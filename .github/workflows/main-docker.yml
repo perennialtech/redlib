@@ -1,112 +1,44 @@
-name: Container build
+name: Docker Build
 
 on:
-  workflow_run:
-    workflows: ["Release Build"]
-    types:
-      - completed
-env:
-  REGISTRY_IMAGE: quay.io/redlib/redlib
+  push:
+    paths-ignore:
+      - "**.md"
+    branches:
+      - 'main'
 
 jobs:
-  build:
+  build-docker:
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
       matrix:
-        include:
-          - { platform: linux/amd64, target: x86_64-unknown-linux-musl}
-          - { platform: linux/arm64, target: aarch64-unknown-linux-musl}
-          - { platform: linux/arm/v7, target: armv7-unknown-linux-musleabihf}
+        config:
+          - { platform: 'linux/amd64', tag: 'latest', dockerfile: 'Dockerfile' }
+          - { platform: 'linux/arm64', tag: 'latest-arm', dockerfile: 'Dockerfile.arm' }
+          - { platform: 'linux/arm/v7', tag: 'latest-armv7', dockerfile: 'Dockerfile.armv7' }
     steps:
-      -
-        name: Checkout
-        uses: actions/checkout@v4
-      -
-        name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY_IMAGE }}
-          tags: |
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
-      -
-        name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      -
-        name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      -
-        name: Login to Quay.io Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: quay.io
-          username: ${{ secrets.QUAY_USERNAME }}
-          password: ${{ secrets.QUAY_ROBOT_TOKEN }}
-      -
-        name: Build and push
-        id: build
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          platforms: ${{ matrix.platform }}
-          labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
-          file: Dockerfile
-          build-args: TARGET=${{ matrix.target }}
-      -
-        name: Export digest
-        run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
-      -
-        name: Upload digest
-        uses: actions/upload-artifact@v3
-        with:
-          name: digests
-          path: /tmp/digests/*
-          if-no-files-found: error
-          retention-days: 1
-  merge:
-    runs-on: ubuntu-latest
-    needs:
-      - build
-    steps:
-      -
-        name: Download digests
-        uses: actions/download-artifact@v3
-        with:
-          name: digests
-          path: /tmp/digests
-      -
-        name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      -
-        name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY_IMAGE }}
-          tags: |
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
-      -
-        name: Login to Quay.io Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: quay.io
-          username: ${{ secrets.QUAY_USERNAME }}
-          password: ${{ secrets.QUAY_ROBOT_TOKEN }}
-      -
-        name: Create manifest list and push
-        working-directory: /tmp/digests
-        run: |
-          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
+      - name: Checkout sources
+        uses: actions/checkout@v3
 
-      - name: Push README to Quay.io
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+        with:
+          platforms: all
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v2
+        with:
+          version: latest
+
+      - name: Login to Quay.io
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_ROBOT_TOKEN }}
+
+      - name: push README to Quay.io
         uses: christian-korneck/update-container-description-action@v1
         env:
           DOCKER_APIKEY: ${{ secrets.APIKEY__QUAY_IO }}
@@ -115,8 +47,13 @@ jobs:
           provider: quay
           readme_file: 'README.md'
 
-      -
-        name: Inspect image
-        run: |
-          docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
-          
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./${{ matrix.config.dockerfile }}
+          platforms: ${{ matrix.config.platform }}
+          push: true
+          tags: quay.io/redlib/redlib:${{ matrix.config.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

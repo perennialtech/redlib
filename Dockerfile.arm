@@ -3,13 +3,22 @@
 ####################################################################################################
 FROM rust:alpine AS builder
 
-RUN apk add --no-cache musl-dev
+RUN apk add --no-cache g++ git
 
-WORKDIR /redlib
+WORKDIR /usr/src/redlib
+
+# cache dependencies in their own layer
+COPY Cargo.lock Cargo.toml .
+RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo install --config net.git-fetch-with-cli=true --path . && rm -rf ./src
 
 COPY . .
 
-RUN cargo build --target x86_64-unknown-linux-musl --release
+# net.git-fetch-with-cli is specified in order to prevent a potential OOM kill
+# in low memory environments. See:
+#     https://users.rust-lang.org/t/cargo-uses-too-much-memory-being-run-in-qemu/76531
+# This is tracked under issue #641. This also requires us to install git in the
+# builder.
+RUN cargo install --config net.git-fetch-with-cli=true --path .
 
 ####################################################################################################
 ## Final image
@@ -21,7 +30,7 @@ COPY --from=builder /usr/share/ca-certificates /usr/share/ca-certificates
 COPY --from=builder /etc/ssl/certs /etc/ssl/certs
 
 # Copy our build
-COPY --from=builder /redlib/target/x86_64-unknown-linux-musl/release/redlib /usr/local/bin/redlib
+COPY --from=builder /usr/local/cargo/bin/redlib /usr/local/bin/redlib
 
 # Use an unprivileged user.
 RUN adduser --home /nonexistent --no-create-home --disabled-password redlib
@@ -31,6 +40,6 @@ USER redlib
 EXPOSE 8080
 
 # Run a healthcheck every minute to make sure redlib is functional
-HEALTHCHECK --interval=1m --timeout=3s CMD wget --spider -q http://localhost:8080/settings || exit 1
+HEALTHCHECK --interval=1m --timeout=3s CMD wget --spider --q http://localhost:8080/settings || exit 1
 
 CMD ["redlib"]
