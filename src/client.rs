@@ -20,7 +20,7 @@ use std::{io, result::Result};
 use std::time::Duration;
 
 #[cfg(feature = "tor")]
-use arti_client::{BootstrapBehavior, TorClient};
+use arti_client::TorClient;
 #[cfg(feature = "tor")]
 use arti_client::config::TorClientConfigBuilder;
 #[cfg(feature = "tor")]
@@ -33,6 +33,7 @@ use tls_api::{TlsConnector as TlsConnectorTrait, TlsConnectorBuilder};
 use tls_api_native_tls::TlsConnector;
 
 use crate::dbg_msg;
+use crate::config::get_setting;
 use crate::oauth::{force_refresh_token, token_daemon, Oauth};
 use crate::server::RequestExt;
 use crate::utils::{format_url, Post};
@@ -53,9 +54,9 @@ const REDDIT_SHORT_URL_BASE: &str = "https://redd.it";
 const REDDIT_SHORT_URL_BASE_HOST: &str = "redd.it";
 
 #[cfg(feature = "tor")]
-const REDDIT_SHORT_URL_BASE: &str = "https://reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion";
+const REDDIT_SHORT_URL_BASE: &str = "https://redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd.onion";
 #[cfg(feature = "tor")]
-const REDDIT_SHORT_URL_BASE_HOST: &str = "reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion";
+const REDDIT_SHORT_URL_BASE_HOST: &str = "redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd.onion";
 
 #[cfg(not(feature = "tor"))]
 const ALTERNATIVE_REDDIT_URL_BASE: &str = "https://www.reddit.com";
@@ -76,38 +77,44 @@ pub static CLIENT: Lazy<Client<HttpsConnector<HttpConnector>>> = Lazy::new(|| Cl
 
 #[cfg(feature = "tor")]
 pub static TOR_CLIENT: Lazy<TorClient<PreferredRuntime>> = Lazy::new(|| {
-	// Use /tmp for state and cache directories to avoid permission issues
-	// in Docker containers where home directory might not be writable
-	let config = TorClientConfigBuilder::from_directories(
-		std::path::PathBuf::from("/tmp/arti-state"),
-		std::path::PathBuf::from("/tmp/arti-cache")
-	)
-	.build()
-	.expect("Failed to build Tor client config");
+	// Use configuration system for Arti directories, default to /tmp/arti
+	let arti_path = get_setting("REDLIB_ARTI_PATH").unwrap_or_else(|| "/tmp/arti".to_string());
+	
+	// Create the directories if they don't exist
+	let state_dir = format!("{}/state", arti_path);
+	let cache_dir = format!("{}/cache", arti_path);
+	std::fs::create_dir_all(&state_dir).ok();
+	std::fs::create_dir_all(&cache_dir).ok();
+	
+	info!("Using Arti directories - State: {}, Cache: {}", state_dir, cache_dir);
+	
+	let mut config_builder = TorClientConfigBuilder::from_directories(
+		std::path::PathBuf::from(state_dir),
+		std::path::PathBuf::from(cache_dir)
+	);
+
+	// Disable dormant mode to keep connections active
+	config_builder.address_filter().allow_onion_addrs(true);
+	config_builder.stream_timeouts().connect_timeout(std::time::Duration::from_secs(60));
+
+	let config = config_builder.build().expect("Failed to build Tor client config");
 
 	block_on(async {
-		info!("Creating Tor client...");
-		let client = TorClient::with_runtime(PreferredRuntime::current().expect("Could not get runtime"))
+		info!("Creating and bootstrapping Tor client...");
+		match TorClient::with_runtime(PreferredRuntime::current().expect("Could not get runtime"))
 			.config(config)
-			.bootstrap_behavior(BootstrapBehavior::OnDemand)
-			.create_unbootstrapped()
-			.expect("Unable to create Tor client!");
-
-		// Try to bootstrap the client
-		info!("Bootstrapping Tor client...");
-		match tokio::time::timeout(Duration::from_secs(60), client.bootstrap()).await {
-			Ok(Ok(_)) => {
-				info!("Tor client bootstrapped successfully!");
+			.create_bootstrapped()
+			.await
+		{
+			Ok(client) => {
+				info!("Tor client created and bootstrapped successfully!");
+				client
 			}
-			Ok(Err(e)) => {
-				error!("Failed to bootstrap Tor client: {}", e);
-			}
-			Err(_) => {
-				error!("Tor bootstrap timed out after 30 seconds");
+			Err(e) => {
+				error!("Failed to create and bootstrap Tor client: {}", e);
+				panic!("Cannot start without Tor connection: {}", e);
 			}
 		}
-
-		client
 	})
 });
 

@@ -1007,16 +1007,16 @@ static REGEX_URL_WWW: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://www\.(red
 static REGEX_URL_OLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://old\.(reddit\.com|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/(.*)").unwrap());
 static REGEX_URL_NP: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://np\.(reddit\.com|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/(.*)").unwrap());
 static REGEX_URL_PLAIN: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://(reddit\.com|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/(.*)").unwrap());
-static REGEX_URL_VIDEOS: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://v\.(redd\.it|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/(.*)/DASH_([0-9]{2,4}(\.mp4|$|\?source=fallback))").unwrap());
-static REGEX_URL_VIDEOS_HLS: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://v\.(redd\.it|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/(.+)/(HLSPlaylist\.m3u8.*)$").unwrap());
-static REGEX_URL_IMAGES: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://i\.(redd\.it|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/(.*)").unwrap());
+static REGEX_URL_VIDEOS: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://v\.(redd\.it|redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd\.onion)/(.*)/DASH_([0-9]{2,4}(\.mp4|$|\?source=fallback))").unwrap());
+static REGEX_URL_VIDEOS_HLS: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://v\.(redd\.it|redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd\.onion)/(.+)/(HLSPlaylist\.m3u8.*)$").unwrap());
+static REGEX_URL_IMAGES: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://i\.(redd\.it|redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd\.onion)/(.*)").unwrap());
 static REGEX_URL_THUMBS_A: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://a\.thumbs\.redditmedia\.com/(.*)").unwrap());
 static REGEX_URL_THUMBS_B: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://b\.thumbs\.redditmedia\.com/(.*)").unwrap());
 static REGEX_URL_EMOJI: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://emoji\.redditmedia\.com/(.*)/(.*)").unwrap());
-static REGEX_URL_PREVIEW: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://preview\.redd\.it/(.*)").unwrap());
-static REGEX_URL_EXTERNAL_PREVIEW: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://external\-preview\.redd\.it/(.*)").unwrap());
+static REGEX_URL_PREVIEW: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://preview\.(redd\.it|redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd\.onion)/(.*)").unwrap());
+static REGEX_URL_EXTERNAL_PREVIEW: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://external\-preview\.(redd\.it|redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd\.onion)/(.*)").unwrap());
 static REGEX_URL_STYLES: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://styles\.redditmedia\.com/(.*)").unwrap());
-static REGEX_URL_STATIC_MEDIA: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://www\.redditstatic\.com/(.*)").unwrap());
+static REGEX_URL_STATIC_MEDIA: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://www\.(redditstatic\.com|reddittic34i5gtjcnm2fb7fv2eyop4vbxquuc36prnbs7d2kp3saoqd\.onion)/(.*)").unwrap());
 
 // Direct urls to proxy if proxy is enabled
 pub fn format_url(url: &str) -> String {
@@ -1031,9 +1031,12 @@ pub fn format_url(url: &str) -> String {
 			.replace("https://old.reddit.com", "https://old.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion")
 			.replace("https://np.reddit.com", "https://np.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion")
 			.replace("https://oauth.reddit.com", "https://oauth.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion")
-			.replace("https://v.redd.it", "https://v.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion")
-			.replace("https://i.redd.it", "https://i.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion")
-			.replace("https://redd.it", "https://reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion");
+			.replace("https://v.redd.it", "https://v.redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd.onion")
+			.replace("https://i.redd.it", "https://i.redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd.onion")
+			.replace("https://redd.it", "https://redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd.onion")
+			.replace("https://preview.redd.it", "https://preview.redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd.onion")
+			.replace("https://external-preview.redd.it", "https://external-preview.redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd.onion")
+			.replace("https://www.redditstatic.com", "https://www.reddittic34i5gtjcnm2fb7fv2eyop4vbxquuc36prnbs7d2kp3saoqd.onion");
 		
 		#[cfg(feature = "tor")]
 		let url_ref = &url;
@@ -1108,6 +1111,13 @@ pub fn format_url(url: &str) -> String {
 				"v.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion" => chain!(capture(&REGEX_URL_VIDEOS, "/vid/", 2), capture(&REGEX_URL_VIDEOS_HLS, "/hls/", 2)),
 				"i.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion" => capture(&REGEX_URL_IMAGES, "/img/", 1),
 				"oauth.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion" => capture(&REGEX_URL_PLAIN, "/", 1),
+				// Handle new .onion domains for redd.it services
+				"v.redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd.onion" => chain!(capture(&REGEX_URL_VIDEOS, "/vid/", 2), capture(&REGEX_URL_VIDEOS_HLS, "/hls/", 2)),
+				"i.redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd.onion" => capture(&REGEX_URL_IMAGES, "/img/", 1),
+				"preview.redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd.onion" => capture(&REGEX_URL_PREVIEW, "/preview/pre/", 1),
+				"external-preview.redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd.onion" => capture(&REGEX_URL_EXTERNAL_PREVIEW, "/preview/external-pre/", 1),
+				"redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd.onion" => capture(&REGEX_URL_PLAIN, "/", 1),
+				"www.reddittic34i5gtjcnm2fb7fv2eyop4vbxquuc36prnbs7d2kp3saoqd.onion" => capture(&REGEX_URL_STATIC_MEDIA, "/static/", 1),
 				_ => url_ref.to_string(),
 			}
 		})
