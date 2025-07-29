@@ -17,7 +17,6 @@ use serde_json::Value;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU16};
 use std::{io, result::Result};
-use std::time::Duration;
 
 #[cfg(feature = "tor")]
 use arti_client::TorClient;
