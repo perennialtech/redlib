@@ -5,7 +5,7 @@ use crate::{
 	oauth_resources::ANDROID_APP_VERSION_LIST,
 };
 use base64::{engine::general_purpose, Engine as _};
-use hyper::{client, Body, Method, Request};
+use hyper::{client, Body, Method, Request, body::Buf};
 use log::{error, info, trace};
 use serde_json::json;
 use tegen::tegen::TextGenerator;
@@ -125,8 +125,8 @@ impl Oauth {
 		trace!("Serializing response...");
 
 		// Serialize response
-		let body_bytes = hyper::body::to_bytes(resp.into_body()).await?;
-		let json: serde_json::Value = serde_json::from_slice(&body_bytes)?;
+		let body = hyper::body::aggregate(resp.into_body()).await?;
+		let json: serde_json::Value = serde_json::from_reader(body.reader())?;
 
 		trace!("Accessing relevant fields...");
 

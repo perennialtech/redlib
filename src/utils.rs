@@ -1003,13 +1003,13 @@ pub async fn catch_random(sub: &str, additional: &str) -> Result<Response<Body>,
 	}
 }
 
-static REGEX_URL_WWW: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://www\.reddit\.com/(.*)").unwrap());
-static REGEX_URL_OLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://old\.reddit\.com/(.*)").unwrap());
-static REGEX_URL_NP: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://np\.reddit\.com/(.*)").unwrap());
-static REGEX_URL_PLAIN: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://reddit\.com/(.*)").unwrap());
-static REGEX_URL_VIDEOS: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://v\.redd\.it/(.*)/DASH_([0-9]{2,4}(\.mp4|$|\?source=fallback))").unwrap());
-static REGEX_URL_VIDEOS_HLS: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://v\.redd\.it/(.+)/(HLSPlaylist\.m3u8.*)$").unwrap());
-static REGEX_URL_IMAGES: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://i\.redd\.it/(.*)").unwrap());
+static REGEX_URL_WWW: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://www\.(reddit\.com|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/(.*)").unwrap());
+static REGEX_URL_OLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://old\.(reddit\.com|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/(.*)").unwrap());
+static REGEX_URL_NP: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://np\.(reddit\.com|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/(.*)").unwrap());
+static REGEX_URL_PLAIN: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://(reddit\.com|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/(.*)").unwrap());
+static REGEX_URL_VIDEOS: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://v\.(redd\.it|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/(.*)/DASH_([0-9]{2,4}(\.mp4|$|\?source=fallback))").unwrap());
+static REGEX_URL_VIDEOS_HLS: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://v\.(redd\.it|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/(.+)/(HLSPlaylist\.m3u8.*)$").unwrap());
+static REGEX_URL_IMAGES: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://i\.(redd\.it|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/(.*)").unwrap());
 static REGEX_URL_THUMBS_A: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://a\.thumbs\.redditmedia\.com/(.*)").unwrap());
 static REGEX_URL_THUMBS_B: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://b\.thumbs\.redditmedia\.com/(.*)").unwrap());
 static REGEX_URL_EMOJI: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://emoji\.redditmedia\.com/(.*)/(.*)").unwrap());
@@ -1023,13 +1023,44 @@ pub fn format_url(url: &str) -> String {
 	if url.is_empty() || url == "self" || url == "default" || url == "nsfw" || url == "spoiler" {
 		String::new()
 	} else {
-		Url::parse(url).map_or(url.to_string(), |parsed| {
+		// Convert Reddit URLs to .onion URLs when using Tor
+		#[cfg(feature = "tor")]
+		let url = url
+			.replace("https://www.reddit.com", "https://www.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion")
+			.replace("https://reddit.com", "https://reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion")
+			.replace("https://old.reddit.com", "https://old.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion")
+			.replace("https://np.reddit.com", "https://np.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion")
+			.replace("https://oauth.reddit.com", "https://oauth.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion")
+			.replace("https://v.redd.it", "https://v.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion")
+			.replace("https://i.redd.it", "https://i.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion")
+			.replace("https://redd.it", "https://reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion");
+		
+		#[cfg(feature = "tor")]
+		let url_ref = &url;
+		#[cfg(not(feature = "tor"))]
+		let url_ref = url;
+		
+		Url::parse(url_ref).map_or(url_ref.to_string(), |parsed| {
 			let domain = parsed.domain().unwrap_or_default();
 
 			let capture = |regex: &Regex, format: &str, segments: i16| {
-				regex.captures(url).map_or(String::new(), |caps| match segments {
-					1 => [format, &caps[1]].join(""),
-					2 => [format, &caps[1], "/", &caps[2]].join(""),
+				regex.captures(url_ref).map_or(String::new(), |caps| match segments {
+					1 => {
+						// Handle both regular and .onion URLs - capture group is now at index 2
+						if caps.len() > 2 {
+							[format, &caps[2]].join("")
+						} else {
+							[format, &caps[1]].join("")
+						}
+					},
+					2 => {
+						// For videos, we need to handle the different capture groups
+						if caps.len() > 3 {
+							[format, &caps[2], "/", &caps[3]].join("")
+						} else {
+							[format, &caps[1], "/", &caps[2]].join("")
+						}
+					},
 					_ => String::new(),
 				})
 			};
@@ -1069,7 +1100,15 @@ pub fn format_url(url: &str) -> String {
 				"external-preview.redd.it" => capture(&REGEX_URL_EXTERNAL_PREVIEW, "/preview/external-pre/", 1),
 				"styles.redditmedia.com" => capture(&REGEX_URL_STYLES, "/style/", 1),
 				"www.redditstatic.com" => capture(&REGEX_URL_STATIC_MEDIA, "/static/", 1),
-				_ => url.to_string(),
+				// Handle .onion domains
+				"www.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion" => capture(&REGEX_URL_WWW, "/", 1),
+				"old.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion" => capture(&REGEX_URL_OLD, "/", 1),
+				"np.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion" => capture(&REGEX_URL_NP, "/", 1),
+				"reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion" => capture(&REGEX_URL_PLAIN, "/", 1),
+				"v.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion" => chain!(capture(&REGEX_URL_VIDEOS, "/vid/", 2), capture(&REGEX_URL_VIDEOS_HLS, "/hls/", 2)),
+				"i.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion" => capture(&REGEX_URL_IMAGES, "/img/", 1),
+				"oauth.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion" => capture(&REGEX_URL_PLAIN, "/", 1),
+				_ => url_ref.to_string(),
 			}
 		})
 	}
@@ -1087,7 +1126,7 @@ pub fn render_bullet_lists(input_text: &str) -> String {
 }
 
 // These are links we want to replace in-body
-static REDDIT_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r#"href="(https|http|)://(www\.|old\.|np\.|amp\.|new\.|)(reddit\.com|redd\.it)/"#).unwrap());
+static REDDIT_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r#"href="(https|http|)://(www\.|old\.|np\.|amp\.|new\.|oauth\.|)(reddit\.com|redd\.it|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/"#).unwrap());
 static REDDIT_PREVIEW_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://(external-preview|preview|i)\.redd\.it(.*)").unwrap());
 static REDDIT_EMOJI_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://(www|).redditstatic\.com/(.*)").unwrap());
 static REDLIB_PREVIEW_LINK_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r#"/(img|preview/)(pre|external-pre)?/(.*?)>"#).unwrap());

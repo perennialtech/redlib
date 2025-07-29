@@ -2,12 +2,14 @@ use arc_swap::ArcSwap;
 use cached::proc_macro::cached;
 use futures_lite::future::block_on;
 use futures_lite::{future::Boxed, FutureExt};
-use hyper::client::HttpConnector;
 use hyper::header::HeaderValue;
 use hyper::{body, body::Buf, header, Body, Client, Method, Request, Response, Uri};
-use hyper_rustls::HttpsConnector;
+#[cfg(not(feature = "tor"))]
+use hyper::client::HttpConnector;
+#[cfg(not(feature = "tor"))]
+use hyper_tls::HttpsConnector;
 use libflate::gzip;
-use log::{error, trace, warn};
+use log::{error, info, trace, warn};
 use once_cell::sync::Lazy;
 use percent_encoding::{percent_encode, CONTROLS};
 use serde_json::Value;
@@ -15,25 +17,106 @@ use serde_json::Value;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU16};
 use std::{io, result::Result};
+use std::time::Duration;
+
+#[cfg(feature = "tor")]
+use arti_client::{BootstrapBehavior, TorClient};
+#[cfg(feature = "tor")]
+use arti_client::config::TorClientConfigBuilder;
+#[cfg(feature = "tor")]
+use arti_hyper::ArtiHttpConnector;
+#[cfg(feature = "tor")]
+use tor_rtcompat::PreferredRuntime;
+#[cfg(feature = "tor")]
+use tls_api::{TlsConnector as TlsConnectorTrait, TlsConnectorBuilder};
+#[cfg(feature = "tor")]
+use tls_api_native_tls::TlsConnector;
 
 use crate::dbg_msg;
 use crate::oauth::{force_refresh_token, token_daemon, Oauth};
 use crate::server::RequestExt;
 use crate::utils::{format_url, Post};
 
+#[cfg(not(feature = "tor"))]
 const REDDIT_URL_BASE: &str = "https://oauth.reddit.com";
+#[cfg(not(feature = "tor"))]
 const REDDIT_URL_BASE_HOST: &str = "oauth.reddit.com";
 
+#[cfg(feature = "tor")]
+const REDDIT_URL_BASE: &str = "https://oauth.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion";
+#[cfg(feature = "tor")]
+const REDDIT_URL_BASE_HOST: &str = "oauth.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion";
+
+#[cfg(not(feature = "tor"))]
 const REDDIT_SHORT_URL_BASE: &str = "https://redd.it";
+#[cfg(not(feature = "tor"))]
 const REDDIT_SHORT_URL_BASE_HOST: &str = "redd.it";
 
+#[cfg(feature = "tor")]
+const REDDIT_SHORT_URL_BASE: &str = "https://reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion";
+#[cfg(feature = "tor")]
+const REDDIT_SHORT_URL_BASE_HOST: &str = "reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion";
+
+#[cfg(not(feature = "tor"))]
 const ALTERNATIVE_REDDIT_URL_BASE: &str = "https://www.reddit.com";
+#[cfg(not(feature = "tor"))]
 const ALTERNATIVE_REDDIT_URL_BASE_HOST: &str = "www.reddit.com";
 
-pub static HTTPS_CONNECTOR: Lazy<HttpsConnector<HttpConnector>> =
-	Lazy::new(|| hyper_rustls::HttpsConnectorBuilder::new().with_native_roots().https_only().enable_http2().build());
+#[cfg(feature = "tor")]
+const ALTERNATIVE_REDDIT_URL_BASE: &str = "https://www.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion";
+#[cfg(feature = "tor")]
+const ALTERNATIVE_REDDIT_URL_BASE_HOST: &str = "www.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion";
 
+#[cfg(not(feature = "tor"))]
+pub static HTTPS_CONNECTOR: Lazy<HttpsConnector<HttpConnector>> =
+	Lazy::new(|| HttpsConnector::new());
+
+#[cfg(not(feature = "tor"))]
 pub static CLIENT: Lazy<Client<HttpsConnector<HttpConnector>>> = Lazy::new(|| Client::builder().build::<_, Body>(HTTPS_CONNECTOR.clone()));
+
+#[cfg(feature = "tor")]
+pub static TOR_CLIENT: Lazy<TorClient<PreferredRuntime>> = Lazy::new(|| {
+	// Use /tmp for state and cache directories to avoid permission issues
+	// in Docker containers where home directory might not be writable
+	let config = TorClientConfigBuilder::from_directories(
+		std::path::PathBuf::from("/tmp/arti-state"),
+		std::path::PathBuf::from("/tmp/arti-cache")
+	)
+	.build()
+	.expect("Failed to build Tor client config");
+
+	block_on(async {
+		info!("Creating Tor client...");
+		let client = TorClient::with_runtime(PreferredRuntime::current().expect("Could not get runtime"))
+			.config(config)
+			.bootstrap_behavior(BootstrapBehavior::OnDemand)
+			.create_unbootstrapped()
+			.expect("Unable to create Tor client!");
+
+		// Try to bootstrap the client
+		info!("Bootstrapping Tor client...");
+		match tokio::time::timeout(Duration::from_secs(60), client.bootstrap()).await {
+			Ok(Ok(_)) => {
+				info!("Tor client bootstrapped successfully!");
+			}
+			Ok(Err(e)) => {
+				error!("Failed to bootstrap Tor client: {}", e);
+			}
+			Err(_) => {
+				error!("Tor bootstrap timed out after 30 seconds");
+			}
+		}
+
+		client
+	})
+});
+
+#[cfg(feature = "tor")]
+pub static CLIENT: Lazy<Client<ArtiHttpConnector<PreferredRuntime, TlsConnector>>> = Lazy::new(|| {
+	let tls_connector = TlsConnector::builder().unwrap().build().unwrap();
+	let connector = ArtiHttpConnector::new(TOR_CLIENT.clone(), tls_connector);
+	Client::builder().build::<_, Body>(connector)
+});
 
 pub static OAUTH_CLIENT: Lazy<ArcSwap<Oauth>> = Lazy::new(|| {
 	let client = block_on(Oauth::new());
@@ -153,8 +236,11 @@ async fn stream(url: &str, req: &Request<Body>) -> Result<Response<Body>, String
 	// First parameter is target URL (mandatory).
 	let parsed_uri = url.parse::<Uri>().map_err(|_| "Couldn't parse URL".to_string())?;
 
-	// Build the hyper client from the HTTPS connector.
-	let client: &Lazy<Client<_, Body>> = &CLIENT;
+	// Build the hyper client from the HTTPS connector or Tor connector.
+	#[cfg(not(feature = "tor"))]
+	let client: &Lazy<Client<HttpsConnector<HttpConnector>, Body>> = &CLIENT;
+	#[cfg(feature = "tor")]
+	let client: &Lazy<Client<ArtiHttpConnector<PreferredRuntime, TlsConnector>, Body>> = &CLIENT;
 
 	let mut builder = Request::get(parsed_uri);
 
@@ -215,8 +301,11 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 	// Build Reddit URL from path.
 	let url = format!("{base_path}{path}");
 
-	// Construct the hyper client from the HTTPS connector.
-	let client: &Lazy<Client<_, Body>> = &CLIENT;
+	// Construct the hyper client from the HTTPS connector or Tor connector.
+	#[cfg(not(feature = "tor"))]
+	let client: &Lazy<Client<HttpsConnector<HttpConnector>, Body>> = &CLIENT;
+	#[cfg(feature = "tor")]
+	let client: &Lazy<Client<ArtiHttpConnector<PreferredRuntime, TlsConnector>, Body>> = &CLIENT;
 
 	// Build request to Reddit. When making a GET, request gzip compression.
 	// (Reddit doesn't do brotli yet.)
