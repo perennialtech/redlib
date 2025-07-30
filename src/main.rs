@@ -275,6 +275,8 @@ async fn main() {
 	app
 		.at("/preview/:loc/award_images/:fullname/:id")
 		.get(|r| proxy(r, "https://{loc}view.redd.it/award_images/{fullname}/{id}").boxed());
+	app.at("/preview/pre/:id").get(|r| proxy(r, "https://preview.redd.it/{id}").boxed());
+	app.at("/preview/external-pre/:id").get(|r| proxy(r, "https://external-preview.redd.it/{id}").boxed());
 	app.at("/preview/:loc/:id").get(|r| proxy(r, "https://{loc}view.redd.it/{id}").boxed());
 	app.at("/style/*path").get(|r| proxy(r, "https://styles.redditmedia.com/{path}").boxed());
 	app.at("/static/*path").get(|r| proxy(r, "https://www.redditstatic.com/{path}").boxed());

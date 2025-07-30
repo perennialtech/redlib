@@ -1146,8 +1146,8 @@ pub fn render_bullet_lists(input_text: &str) -> String {
 
 // These are links we want to replace in-body
 static REDDIT_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r#"href="(https|http|)://(www\.|old\.|np\.|amp\.|new\.|oauth\.|)(reddit\.com|redd\.it|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/"#).unwrap());
-static REDDIT_PREVIEW_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://(external-preview|preview|i)\.redd\.it(.*)").unwrap());
-static REDDIT_EMOJI_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://(www|).redditstatic\.com/(.*)").unwrap());
+static REDDIT_PREVIEW_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://(external-preview|preview|i)\.(redd\.it|redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd\.onion)(.*)").unwrap());
+static REDDIT_EMOJI_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://(www\.)?(redditstatic\.com|reddittic34i5gtjcnm2fb7fv2eyop4vbxquuc36prnbs7d2kp3saoqd\.onion)/(.*)").unwrap());
 static REDLIB_PREVIEW_LINK_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r#"/(img|preview/)(pre|external-pre)?/(.*?)>"#).unwrap());
 static REDLIB_PREVIEW_TEXT_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r">(.*?)</a>").unwrap());
 
@@ -1213,7 +1213,7 @@ pub fn rewrite_urls(input_text: &str) -> String {
 			};
 
 			text1 = REDDIT_PREVIEW_REGEX
-				.replace(&text1, format!("{_preview_type}$2"))
+				.replace(&text1, format!("{_preview_type}$3"))
 				.replace(&image_to_replace, &_image_replacement)
 		}
 	}
