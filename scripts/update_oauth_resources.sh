@@ -5,6 +5,18 @@
 # - rg
 # - jq
 
+# User agents for APKMirror requests - AI assistants and search engines
+USER_AGENTS=(
+    "Mozilla/5.0 (compatible; archive.org_bot +http://www.archive.org/details/archive.org_bot)"
+    "ia_archiver (+http://www.alexa.com/site/help/webmasters; crawler@alexa.com)"
+    "Wayback Machine Bot/1.0"
+)
+
+# Function to get a random user agent
+get_random_user_agent() {
+    echo "${USER_AGENTS[$RANDOM % ${#USER_AGENTS[@]}]}"
+}
+
 # Fetch iOS app versions
 ios_version_list=$(curl -s "https://ipaarchive.com/app/usa/1064216828" | rg "(20\d{2}\.\d+.\d+) / (\d+)" --only-matching -r "Version \$1/Build \$2" | sort | uniq)
 
@@ -38,13 +50,12 @@ done
 # Close the array in the source file
 echo "];" >> "$filename"
 
-# Fetch Android app versions
-page_1=$(curl -s "https://apkcombo.com/reddit/com.reddit.frontpage/old-versions/" | rg "<a class=\"ver-item\" href=\"(/reddit/com\.reddit\.frontpage/download/phone-20\d{2}\.\d+\.\d+-apk)\" rel=\"nofollow\">" -r "https://apkcombo.com\$1" | sort | uniq | sed 's/      //g')
-# Append with pages
-page_2=$(curl -s "https://apkcombo.com/reddit/com.reddit.frontpage/old-versions?page=2" | rg "<a class=\"ver-item\" href=\"(/reddit/com\.reddit\.frontpage/download/phone-20\d{2}\.\d+\.\d+-apk)\" rel=\"nofollow\">" -r "https://apkcombo.com\$1" | sort | uniq | sed 's/      //g')
-page_3=$(curl -s "https://apkcombo.com/reddit/com.reddit.frontpage/old-versions?page=3" | rg "<a class=\"ver-item\" href=\"(/reddit/com\.reddit\.frontpage/download/phone-20\d{2}\.\d+\.\d+-apk)\" rel=\"nofollow\">" -r "https://apkcombo.com\$1" | sort | uniq | sed 's/      //g')
-page_4=$(curl -s "https://apkcombo.com/reddit/com.reddit.frontpage/old-versions?page=4" | rg "<a class=\"ver-item\" href=\"(/reddit/com\.reddit\.frontpage/download/phone-20\d{2}\.\d+\.\d+-apk)\" rel=\"nofollow\">" -r "https://apkcombo.com\$1" | sort | uniq | sed 's/      //g')
-page_5=$(curl -s "https://apkcombo.com/reddit/com.reddit.frontpage/old-versions?page=5" | rg "<a class=\"ver-item\" href=\"(/reddit/com\.reddit\.frontpage/download/phone-20\d{2}\.\d+\.\d+-apk)\" rel=\"nofollow\">" -r "https://apkcombo.com\$1" | sort | uniq | sed 's/      //g')
+# Fetch Android app versions from APKMirror
+page_1=$(curl -s -H "User-Agent: $(get_random_user_agent)" "https://www.apkmirror.com/uploads/?devcategory=redditinc" | rg 'href="(/apk/redditinc/reddit/reddit-[0-9]+-[0-9]+-[0-9]+-release/)"' -o -r "https://www.apkmirror.com\$1" | sort -u)
+page_2=$(curl -s -H "User-Agent: $(get_random_user_agent)" "https://www.apkmirror.com/uploads/page/2/?devcategory=redditinc" | rg 'href="(/apk/redditinc/reddit/reddit-[0-9]+-[0-9]+-[0-9]+-release/)"' -o -r "https://www.apkmirror.com\$1" | sort -u)
+page_3=$(curl -s -H "User-Agent: $(get_random_user_agent)" "https://www.apkmirror.com/uploads/page/3/?devcategory=redditinc" | rg 'href="(/apk/redditinc/reddit/reddit-[0-9]+-[0-9]+-[0-9]+-release/)"' -o -r "https://www.apkmirror.com\$1" | sort -u)
+page_4=$(curl -s -H "User-Agent: $(get_random_user_agent)" "https://www.apkmirror.com/uploads/page/4/?devcategory=redditinc" | rg 'href="(/apk/redditinc/reddit/reddit-[0-9]+-[0-9]+-[0-9]+-release/)"' -o -r "https://www.apkmirror.com\$1" | sort -u)
+page_5=$(curl -s -H "User-Agent: $(get_random_user_agent)" "https://www.apkmirror.com/uploads/page/5/?devcategory=redditinc" | rg 'href="(/apk/redditinc/reddit/reddit-[0-9]+-[0-9]+-[0-9]+-release/)"' -o -r "https://www.apkmirror.com\$1" | sort -u)
 
 # Concatenate all pages
 versions="${page_1}"
@@ -70,11 +81,14 @@ num=0
 # For each in versions, curl the page and extract the build number
 echo "$versions" | while IFS= read -r line; do
   num=$((num+1))
-  fetch_page=$(curl -s "$line")
-  build=$(echo "$fetch_page" | rg "<span class=\"vercode\">\((\d+)\)</span>" --only-matching -r "\$1" | head -n1)
-  version=$(echo "$fetch_page" | rg "<span class=\"vername\">Reddit (20\d{2}\.\d+\.\d+)</span>" --only-matching -r "\$1" | head -n1)
+
+  fetch_page=$(curl -s -H "User-Agent: $(get_random_user_agent)" "$line")
+  build=$(echo "$fetch_page" | rg 'class="colorLightBlack">([0-9]+)</span>' -o -r '$1' | head -n1)
+  # Extract version from URL instead of HTML to get the correct version for this specific release
+  version=$(echo "$line" | rg 'reddit-([0-9]+-[0-9]+-[0-9]+)-release' -o -r '$1' | sed 's/-/./g')
   echo "	\"Version $version/Build $build\"," >> "$filename"
   echo -e "[$num/$android_count] Fetched \e[32mVersion $version/Build $build\e[0m."
+  sleep 30
 done
 
 # Close the array in the source file

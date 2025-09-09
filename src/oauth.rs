@@ -5,7 +5,7 @@ use crate::{
 	oauth_resources::ANDROID_APP_VERSION_LIST,
 };
 use base64::{engine::general_purpose, Engine as _};
-use hyper::{client, Body, Method, Request, body::Buf};
+use hyper::{Body, Method, Request, body::Buf};
 use log::{error, info, trace};
 use serde_json::json;
 use tegen::tegen::TextGenerator;
@@ -13,7 +13,10 @@ use tokio::time::{error::Elapsed, timeout};
 
 const REDDIT_ANDROID_OAUTH_CLIENT_ID: &str = "ohXpoqrZYub1kg";
 
+#[cfg(not(feature = "tor"))]
 const AUTH_ENDPOINT: &str = "https://www.reddit.com";
+#[cfg(feature = "tor")]
+const AUTH_ENDPOINT: &str = "https://www.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion";
 
 const OAUTH_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -102,8 +105,7 @@ impl Oauth {
 		trace!("Sending token request...\n\n{request:?}");
 
 		// Send request
-		let client: &once_cell::sync::Lazy<client::Client<_, Body>> = &CLIENT;
-		let resp = client.request(request).await?;
+		let resp = CLIENT.request(request).await?;
 
 		trace!("Received response with status {} and length {:?}", resp.status(), resp.headers().get("content-length"));
 		trace!("OAuth headers: {:#?}", resp.headers());
@@ -223,7 +225,7 @@ impl Device {
 
 		// Generate random user-agent
 		let android_app_version = choose(ANDROID_APP_VERSION_LIST).to_string();
-		let android_version = fastrand::u8(9..=14);
+		let android_version = fastrand::u8(9..=16);
 
 		let android_user_agent = format!("Reddit/{android_app_version}/Android {android_version}");
 
