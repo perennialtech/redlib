@@ -1157,6 +1157,22 @@ pub fn rewrite_urls(input_text: &str) -> String {
 		// Rewrite Reddit links to Redlib
 		REDDIT_REGEX.replace_all(input_text, r#"href="/"#).to_string();
 
+	// Replace onion URLs in link text content for better display (only when Tor is enabled)
+	#[cfg(feature = "tor")]
+	{
+		text1 = text1
+			.replace("https://www.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion", "https://www.reddit.com")
+			.replace("https://reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion", "https://reddit.com")
+			.replace("https://old.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion", "https://old.reddit.com")
+			.replace("https://np.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion", "https://np.reddit.com")
+			.replace("https://oauth.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion", "https://oauth.reddit.com")
+			.replace("https://v.redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd.onion", "https://v.redd.it")
+			.replace("https://i.redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd.onion", "https://i.redd.it")
+			.replace("https://redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd.onion", "https://redd.it")
+			.replace("https://preview.redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd.onion", "https://preview.redd.it")
+			.replace("https://external-preview.redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd.onion", "https://external-preview.redd.it");
+	}
+
 	loop {
 		if REDDIT_EMOJI_REGEX.find(&text1).is_none() {
 			break;
