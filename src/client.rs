@@ -119,7 +119,9 @@ pub static TOR_CLIENT: Lazy<TorClient<PreferredRuntime>> = Lazy::new(|| {
 
 #[cfg(feature = "tor")]
 pub static CLIENT: Lazy<Client<ArtiHttpConnector<PreferredRuntime, TlsConnector>>> = Lazy::new(|| {
-	let tls_connector = TlsConnector::builder().unwrap().build().unwrap();
+	let mut tls_builder = TlsConnector::builder().unwrap();
+	tls_builder.builder.danger_accept_invalid_certs(true);
+	let tls_connector = tls_builder.build().unwrap();
 	let connector = ArtiHttpConnector::new(TOR_CLIENT.clone(), tls_connector);
 	Client::builder().build::<_, Body>(connector)
 });
