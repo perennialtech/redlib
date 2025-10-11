@@ -10,12 +10,12 @@ use hyper::client::HttpConnector;
 use hyper_tls::HttpsConnector;
 use libflate::gzip;
 use log::{error, info, trace, warn};
-use once_cell::sync::Lazy;
 use percent_encoding::{percent_encode, CONTROLS};
 use serde_json::Value;
 
 use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU16};
+use std::sync::LazyLock;
 use std::{io, result::Result};
 
 #[cfg(feature = "tor")]
@@ -33,7 +33,7 @@ use tls_api_native_tls::TlsConnector;
 
 use crate::dbg_msg;
 use crate::config::get_setting;
-use crate::oauth::{force_refresh_token, token_daemon, Oauth};
+use crate::oauth::{force_refresh_token, token_daemon, Oauth, OauthBackendImpl};
 use crate::server::RequestExt;
 use crate::utils::{format_url, Post};
 
@@ -68,25 +68,25 @@ const ALTERNATIVE_REDDIT_URL_BASE: &str = "https://www.reddittorjg6rue252oqsxryo
 const ALTERNATIVE_REDDIT_URL_BASE_HOST: &str = "www.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion";
 
 #[cfg(not(feature = "tor"))]
-pub static HTTPS_CONNECTOR: Lazy<HttpsConnector<HttpConnector>> =
-	Lazy::new(|| HttpsConnector::new());
+pub static HTTPS_CONNECTOR: LazyLock<HttpsConnector<HttpConnector>> =
+	LazyLock::new(|| HttpsConnector::new());
 
 #[cfg(not(feature = "tor"))]
-pub static CLIENT: Lazy<Client<HttpsConnector<HttpConnector>>> = Lazy::new(|| Client::builder().build::<_, Body>(HTTPS_CONNECTOR.clone()));
+pub static CLIENT: LazyLock<Client<HttpsConnector<HttpConnector>>> = LazyLock::new(|| Client::builder().build::<_, Body>(HTTPS_CONNECTOR.clone()));
 
 #[cfg(feature = "tor")]
-pub static TOR_CLIENT: Lazy<TorClient<PreferredRuntime>> = Lazy::new(|| {
+pub static TOR_CLIENT: LazyLock<TorClient<PreferredRuntime>> = LazyLock::new(|| {
 	// Use configuration system for Arti directories, default to /tmp/arti
 	let arti_path = get_setting("REDLIB_ARTI_PATH").unwrap_or_else(|| "/tmp/arti".to_string());
-	
+
 	// Create the directories if they don't exist
 	let state_dir = format!("{}/state", arti_path);
 	let cache_dir = format!("{}/cache", arti_path);
 	std::fs::create_dir_all(&state_dir).ok();
 	std::fs::create_dir_all(&cache_dir).ok();
-	
+
 	info!("Using Arti directories - State: {}, Cache: {}", state_dir, cache_dir);
-	
+
 	let mut config_builder = TorClientConfigBuilder::from_directories(
 		std::path::PathBuf::from(state_dir),
 		std::path::PathBuf::from(cache_dir)
@@ -118,7 +118,7 @@ pub static TOR_CLIENT: Lazy<TorClient<PreferredRuntime>> = Lazy::new(|| {
 });
 
 #[cfg(feature = "tor")]
-pub static CLIENT: Lazy<Client<ArtiHttpConnector<PreferredRuntime, TlsConnector>>> = Lazy::new(|| {
+pub static CLIENT: LazyLock<Client<ArtiHttpConnector<PreferredRuntime, TlsConnector>>> = LazyLock::new(|| {
 	let mut tls_builder = TlsConnector::builder().unwrap();
 	tls_builder.builder.danger_accept_invalid_certs(true);
 	let tls_connector = tls_builder.build().unwrap();
@@ -126,7 +126,7 @@ pub static CLIENT: Lazy<Client<ArtiHttpConnector<PreferredRuntime, TlsConnector>
 	Client::builder().build::<_, Body>(connector)
 });
 
-pub static OAUTH_CLIENT: Lazy<ArcSwap<Oauth>> = Lazy::new(|| {
+pub static OAUTH_CLIENT: LazyLock<ArcSwap<Oauth>> = LazyLock::new(|| {
 	let client = block_on(Oauth::new());
 	tokio::spawn(token_daemon());
 	ArcSwap::new(client.into())
@@ -245,10 +245,7 @@ async fn stream(url: &str, req: &Request<Body>) -> Result<Response<Body>, String
 	let parsed_uri = url.parse::<Uri>().map_err(|_| "Couldn't parse URL".to_string())?;
 
 	// Build the hyper client from the HTTPS connector or Tor connector.
-	#[cfg(not(feature = "tor"))]
-	let client: &Lazy<Client<HttpsConnector<HttpConnector>, Body>> = &CLIENT;
-	#[cfg(feature = "tor")]
-	let client: &Lazy<Client<ArtiHttpConnector<PreferredRuntime, TlsConnector>, Body>> = &CLIENT;
+	let client: &LazyLock<Client<_, Body>> = &CLIENT;
 
 	let mut builder = Request::get(parsed_uri);
 
@@ -316,10 +313,7 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 	let url = format!("{base_path}{path}");
 
 	// Construct the hyper client from the HTTPS connector or Tor connector.
-	#[cfg(not(feature = "tor"))]
-	let client: &Lazy<Client<HttpsConnector<HttpConnector>, Body>> = &CLIENT;
-	#[cfg(feature = "tor")]
-	let client: &Lazy<Client<ArtiHttpConnector<PreferredRuntime, TlsConnector>, Body>> = &CLIENT;
+	let client: &LazyLock<Client<_, Body>> = &CLIENT;
 
 	// Build request to Reddit. When making a GET, request gzip compression.
 	// (Reddit doesn't do brotli yet.)
@@ -459,7 +453,7 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 	.boxed()
 }
 
-// Make a request to a Reddit API and parse the JSON response
+/// Make a request to a Reddit API and parse the JSON response
 #[cached(size = 100, time = 30, result = true)]
 pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 	// Closure to quickly build errors
@@ -591,11 +585,17 @@ async fn self_check(sub: &str) -> Result<(), String> {
 }
 
 pub async fn rate_limit_check() -> Result<(), String> {
+	// First, test the Oauth client: we can perform a rate limit check if the OAuth backend is MobileSpoof; if GenericWeb, we skip the check.
+	if matches!(OAUTH_CLIENT.load().backend, OauthBackendImpl::GenericWeb(_)) {
+		warn!("[⚠️] Cannot perform rate limit check, running as GenericWeb. Skipping check.");
+		return Ok(());
+	}
+
 	// First, check a subreddit.
 	self_check("reddit").await?;
 	// This will reduce the rate limit to 99. Assert this check.
 	if OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst) != 99 {
-		return Err(format!("Rate limit check failed: expected 99, got {}", OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst)));
+		return Err(format!("Rate limit check 1 failed: expected 99, got {}", OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst)));
 	}
 	// Now, we switch out the OAuth client.
 	// This checks for the IP rate limit association.
@@ -604,7 +604,7 @@ pub async fn rate_limit_check() -> Result<(), String> {
 	self_check("rust").await?;
 	// Again, assert the rate limit check.
 	if OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst) != 99 {
-		return Err(format!("Rate limit check failed: expected 99, got {}", OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst)));
+		return Err(format!("Rate limit check 2 failed: expected 99, got {}", OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst)));
 	}
 
 	Ok(())
