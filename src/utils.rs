@@ -1008,7 +1008,7 @@ static REGEX_URL_WWW: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://w
 static REGEX_URL_OLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://old\.(reddit\.com|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/(.*)").unwrap());
 static REGEX_URL_NP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://np\.(reddit\.com|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/(.*)").unwrap());
 static REGEX_URL_PLAIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://(reddit\.com|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/(.*)").unwrap());
-static REGEX_URL_VIDEOS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://v\.(redd\.it|redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd\.onion)/(.*)/DASH_([0-9]{2,4}(\.mp4|$|\?source=fallback))").unwrap());
+static REGEX_URL_VIDEOS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://v\.(redd\.it|redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd\.onion)/(.*)/(DASH|CMAF)_([0-9]{2,4}(\.mp4|$|\?source=fallback))").unwrap());
 static REGEX_URL_VIDEOS_HLS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://v\.(redd\.it|redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd\.onion)/(.+)/(HLSPlaylist\.m3u8.*)$").unwrap());
 static REGEX_URL_IMAGES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://i\.(redd\.it|redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd\.onion)/(.*)").unwrap());
 static REGEX_URL_THUMBS_A: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://a\.(thumbs\.redditmedia\.com|thumbs\.reddit4hkhcpcf2mkmuotdlk3gknuzcatsw4f7dx7twdkwmtrt6ax4qd\.onion)/(.*)").unwrap());
@@ -1042,12 +1042,12 @@ pub fn format_url(url: &str) -> String {
 			.replace("https://b.thumbs.redditmedia.com", "https://b.thumbs.reddit4hkhcpcf2mkmuotdlk3gknuzcatsw4f7dx7twdkwmtrt6ax4qd.onion")
 			.replace("https://styles.redditmedia.com", "https://styles.reddit4hkhcpcf2mkmuotdlk3gknuzcatsw4f7dx7twdkwmtrt6ax4qd.onion")
 			.replace("https://emoji.redditmedia.com", "https://emoji.reddit4hkhcpcf2mkmuotdlk3gknuzcatsw4f7dx7twdkwmtrt6ax4qd.onion");
-		
+
 		#[cfg(feature = "tor")]
 		let url_ref = &url;
 		#[cfg(not(feature = "tor"))]
 		let url_ref = url;
-		
+
 		Url::parse(url_ref).map_or(url_ref.to_string(), |parsed| {
 			let domain = parsed.domain().unwrap_or_default();
 
@@ -1069,6 +1069,7 @@ pub fn format_url(url: &str) -> String {
 							[format, &caps[1], "/", &caps[2]].join("")
 						}
 					},
+					3 => [format, &caps[1], "/", &caps[2].to_lowercase().as_str(), "/", &caps[3]].join(""),
 					_ => String::new(),
 				})
 			};
@@ -1099,7 +1100,7 @@ pub fn format_url(url: &str) -> String {
 				"old.reddit.com" => capture(&REGEX_URL_OLD, "/", 1),
 				"np.reddit.com" => capture(&REGEX_URL_NP, "/", 1),
 				"reddit.com" => capture(&REGEX_URL_PLAIN, "/", 1),
-				"v.redd.it" => chain!(capture(&REGEX_URL_VIDEOS, "/vid/", 2), capture(&REGEX_URL_VIDEOS_HLS, "/hls/", 2)),
+				"v.redd.it" => chain!(capture(&REGEX_URL_VIDEOS, "/vid/", 3), capture(&REGEX_URL_VIDEOS_HLS, "/hls/", 2)),
 				"i.redd.it" => capture(&REGEX_URL_IMAGES, "/img/", 1),
 				"a.thumbs.redditmedia.com" => capture(&REGEX_URL_THUMBS_A, "/thumb/a/", 1),
 				"b.thumbs.redditmedia.com" => capture(&REGEX_URL_THUMBS_B, "/thumb/b/", 1),
@@ -1574,7 +1575,8 @@ mod tests {
 			format_url("https://preview.redd.it/qwerty.jpg?auto=webp&s=asdf"),
 			"/preview/pre/qwerty.jpg?auto=webp&s=asdf"
 		);
-		assert_eq!(format_url("https://v.redd.it/foo/DASH_360.mp4?source=fallback"), "/vid/foo/360.mp4");
+		assert_eq!(format_url("https://v.redd.it/foo/DASH_360.mp4?source=fallback"), "/vid/foo/dash/360.mp4");
+		assert_eq!(format_url("https://v.redd.it/foo/CMAF_720.mp4?source=fallback"), "/vid/foo/cmaf/720.mp4");
 		assert_eq!(
 			format_url("https://v.redd.it/foo/HLSPlaylist.m3u8?a=bar&v=1&f=sd"),
 			"/hls/foo/HLSPlaylist.m3u8?a=bar&v=1&f=sd"
