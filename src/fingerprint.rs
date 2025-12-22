@@ -21,6 +21,7 @@ const FP_VERSION: u8 = 1;
 const FP_TOKEN_LEN: usize = 1 + 8 + 16 + 8 + 32;
 
 const UA_CHROME_WINDOW_MAJORS: u32 = 10;
+const UA_FIREFOX_WINDOW_MAJORS: u32 = 10;
 const UA_VERSION_SLACK_MAJORS: u32 = 1;
 const IOS_CURRENT_MAJOR: u32 = 26;
 const UA_REFRESH_SECONDS: i64 = 6 * 60 * 60;
@@ -89,6 +90,7 @@ static FP_SETTINGS: LazyLock<FingerprintSettings> = LazyLock::new(load_settings)
 struct UaVersionState {
 	last_refresh_unix: i64,
 	chrome_stable_major: Option<u32>,
+	firefox_stable_major: Option<u32>,
 }
 
 static UA_VERSIONS: LazyLock<RwLock<UaVersionState>> = LazyLock::new(|| RwLock::new(UaVersionState::default()));
@@ -353,12 +355,15 @@ async fn refresh_ua_versions_once() -> Result<(), String> {
 		}
 	}
 
-	let chrome = fetch_chrome_stable_major().await;
+	let (chrome, firefox) = tokio::join!(fetch_chrome_stable_major(), fetch_firefox_stable_major());
 
 	let mut state = UA_VERSIONS.write().map_err(|_| "UA_VERSIONS poisoned".to_string())?;
 	state.last_refresh_unix = now;
 	if let Ok(v) = chrome {
 		state.chrome_stable_major = Some(v);
+	}
+	if let Ok(v) = firefox {
+		state.firefox_stable_major = Some(v);
 	}
 
 	Ok(())
@@ -382,6 +387,25 @@ async fn fetch_chrome_stable_major() -> Result<u32, String> {
 	Ok(major)
 }
 
+async fn fetch_firefox_stable_major() -> Result<u32, String> {
+	// Mozilla product-details API (public JSON).
+	let uri: hyper::Uri = "https://product-details.mozilla.org/1.0/firefox_versions.json"
+		.parse()
+		.map_err(|e| format!("Invalid Firefox versions URI: {e}"))?;
+
+	let resp = CLIENT.get(uri).await.map_err(|e| format!("Failed to fetch Firefox version: {e}"))?;
+	let bytes = hyper::body::to_bytes(resp.into_body())
+		.await
+		.map_err(|e| format!("Failed to read Firefox version body: {e}"))?;
+
+	let json: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("Failed to parse Firefox version JSON: {e}"))?;
+	let version = json["LATEST_FIREFOX_VERSION"]
+		.as_str()
+		.ok_or_else(|| "Missing LATEST_FIREFOX_VERSION".to_string())?;
+	let major = version.split('.').next().and_then(|v| v.parse::<u32>().ok()).ok_or_else(|| "Bad Firefox version".to_string())?;
+	Ok(major)
+}
+
 fn ua_is_too_old(ua: &str) -> bool {
 	let ua_lc = ua.to_ascii_lowercase();
 
@@ -402,12 +426,28 @@ fn ua_is_too_old(ua: &str) -> bool {
 		return true;
 	}
 
+	if let Some(major) = parse_firefox_family_major(&ua_lc) {
+		let current = UA_VERSIONS.read().ok().and_then(|s| s.firefox_stable_major);
+		let Some(current) = current else { return false };
+		let min_allowed = current.saturating_sub(UA_FIREFOX_WINDOW_MAJORS + UA_VERSION_SLACK_MAJORS);
+		return major < min_allowed;
+	}
+
 	false
 }
 
 fn parse_chrome_family_major(ua_lc: &str) -> Option<u32> {
 	// Prefer explicit tokens where present; fall back to Chrome/ for most Chromium browsers.
 	for token in ["edg/", "edgios/", "crios/", "opr/", "chrome/"] {
+		if let Some(v) = parse_major_after(ua_lc, token) {
+			return Some(v);
+		}
+	}
+	None
+}
+
+fn parse_firefox_family_major(ua_lc: &str) -> Option<u32> {
+	for token in ["firefox/", "fxios/"] {
 		if let Some(v) = parse_major_after(ua_lc, token) {
 			return Some(v);
 		}
@@ -679,6 +719,18 @@ mod tests {
 		assert_eq!(
 			parse_chrome_family_major("mozilla/5.0 (iphone) crios/132.0.0.0 mobile/ safari/604.1"),
 			Some(132)
+		);
+	}
+
+	#[test]
+	fn ua_parse_firefox_major() {
+		assert_eq!(
+			parse_firefox_family_major("mozilla/5.0 (x11; linux x86_64; rv:133.0) gecko/20100101 firefox/133.0"),
+			Some(133)
+		);
+		assert_eq!(
+			parse_firefox_family_major("mozilla/5.0 (iphone; cpu iphone os 26_2 like mac os x) applewebkit/605.1.15 (khtml, like gecko) fxios/133.0 mobile/15e148 safari/604.1"),
+			Some(133)
 		);
 	}
 

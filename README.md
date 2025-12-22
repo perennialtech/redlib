@@ -431,7 +431,7 @@ Assign a default value for each instance-specific setting by passing environment
 | `FINGERPRINT_MAX_AGE_SECONDS` | Integer    | `86400`                | How long a successful fingerprint validation is trusted (in seconds).                                     |
 | `FINGERPRINT_SCORE_THRESHOLD` | Integer    | `50`                   | Detection threshold; lower values block more clients.                                                     |
 | `FINGERPRINT_BLOCKLIST`   | Comma-separated hex IDs | (empty)        | Fingerprint IDs to always block (from `/__fp/verify` responses).                                          |
-| `UA` (implicit)           | (auto)          | (auto)             | When fingerprinting is on, UA age gating blocks Chromium-family browsers older than ~11 major versions and iOS Safari older than the current iOS major (fetched from Apple). |
+| `UA` (implicit)           | (auto)          | (auto)             | When fingerprinting is on, UA age gating blocks Chromium-family browsers older than ~11 major versions |
 ## Default user settings
 
 Assign a default value for each user-modifiable setting by passing environment variables to Redlib in the format `REDLIB_DEFAULT_{Y}`. Replace `{Y}` with the setting name (see list below) in capital letters.
