@@ -1,11 +1,4 @@
-FROM rust:slim-trixie AS builder
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    perl \
-    pkg-config \
-    libssl-dev \
- && rm -rf /var/lib/apt/lists/*
+FROM rust:trixie AS builder
 
 WORKDIR /redlib
 
@@ -25,15 +18,17 @@ RUN echo "finished building redlib!"
 ########################
 ## release image
 ########################
-FROM gcr.io/distroless/cc-debian13 AS release
+FROM gcr.io/distroless/cc-debian13:nonroot AS release
 
 # Import redlib binary from builder
-COPY --from=builder /redlib/target/release/redlib /app/redlib
-
-# Use non-root user provided by distroless
-USER nonroot:nonroot
+COPY --from=builder /redlib/target/release/redlib ./redlib
+COPY --from=builder /usr/lib/x86_64-linux-gnu/liblzma.so.5 /usr/lib/liblzma.so.5
 
 # Document that we intend to expose port 8080
 EXPOSE 8080
 
-CMD ["/app/redlib"]
+# Arti
+ENV REDLIB_ARTI_PATH="/tmp/arti"
+VOLUME ["/tmp/arti"]
+
+CMD ["./redlib"]
