@@ -12,6 +12,8 @@
 - ☁️ Light: no JavaScript, no ads, no tracking, no bloat
 - 🕵 Private: all requests are proxied through the server, including media
 - 🔒 Secure: strong [Content Security Policy](https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP) prevents browser requests to Reddit
+- 🧅 Tor: integrated [Arti](https://gitlab.torproject.org/tpo/core/arti) (Tor) for per-request IP rotation to bypass Reddit's rate limits
+- 🛡️ Resilience: fingerprinting checks to catch nuisance bots (e.g. Alibaba) and prevent scraping-based DOS attacks
 
 ---
 
@@ -97,6 +99,8 @@ Several technical improvements have also been made, including:
 - **OAuth token spoofing**: To circumvent rate limits imposed by Reddit, OAuth token spoofing is used to mimick the most common iOS and Android clients. While spoofing both iOS and Android clients was explored, only the Android client was chosen due to content restrictions when using an anonymous iOS client.
 - **Token refreshing**: The authentication token is refreshed every 24 hours, emulating the behavior of the official Android app.
 - **HTTP header mimicking**: Efforts are made to send along as many of the official app's headers as possible to reduce the likelihood of Reddit's crackdown on Redlib's requests.
+- **Arti/Tor Integration**: Integrated [Arti](https://gitlab.torproject.org/tpo/core/arti) to route requests through the Tor network, allowing for per-request IP rotation to effectively bypass Reddit's strict rate limits.
+- **Fingerprinting & Anti-Bot**: Implements browser fingerprinting checks to validate clients, specifically designed to stop nuisance bots (like Alibaba) from scraping and to mitigate DOS attacks.
 
 ---
 
