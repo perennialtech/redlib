@@ -1,20 +1,39 @@
-FROM alpine:3.19
+FROM rust:slim-trixie AS builder
 
-ARG TARGET
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    perl \
+    pkg-config \
+    libssl-dev \
+ && rm -rf /var/lib/apt/lists/*
 
-RUN apk add --no-cache curl
+WORKDIR /redlib
 
-RUN curl -L "https://github.com/redlib-org/redlib/releases/latest/download/redlib-${TARGET}.tar.gz" | \
-    tar xz -C /usr/local/bin/
+# download (most) dependencies in their own layer
+COPY Cargo.lock Cargo.toml ./
+RUN mkdir src && echo "fn main() { panic!(\"why am i running?\") }" > src/main.rs
+RUN cargo build --release --locked --bin redlib
+RUN rm ./src/main.rs && rmdir ./src
 
-RUN adduser --home /nonexistent --no-create-home --disabled-password redlib
-USER redlib
+# copy the source and build the redlib binary
+COPY . ./
+# Update the mtime of the main file to force a rebuild of the binary
+RUN touch src/main.rs
+RUN cargo build --release --locked --bin redlib
+RUN echo "finished building redlib!"
 
-# Tell Docker to expose port 8080
+########################
+## release image
+########################
+FROM gcr.io/distroless/cc-debian13 AS release
+
+# Import redlib binary from builder
+COPY --from=builder /redlib/target/release/redlib /app/redlib
+
+# Use non-root user provided by distroless
+USER nonroot:nonroot
+
+# Document that we intend to expose port 8080
 EXPOSE 8080
 
-# Run a healthcheck every minute to make sure redlib is functional
-HEALTHCHECK --interval=1m --timeout=3s CMD wget --spider -q http://localhost:8080/settings || exit 1
-
-CMD ["redlib"]
-
+CMD ["/app/redlib"]
