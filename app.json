@@ -79,6 +79,24 @@
     },
     "REDLIB_DEFAULT_REMOVE_DEFAULT_FEEDS": {
       "required": false
+    },
+    "REDLIB_ARTI_PATH": {
+      "required": false
+    },
+    "REDLIB_FINGERPRINTING": {
+      "required": false
+    },
+    "REDLIB_FINGERPRINT_SECRET": {
+      "required": false
+    },
+    "REDLIB_FINGERPRINT_MAX_AGE_SECONDS": {
+      "required": false
+    },
+    "REDLIB_FINGERPRINT_SCORE_THRESHOLD": {
+      "required": false
+    },
+    "REDLIB_FINGERPRINT_BLOCKLIST": {
+      "required": false
     }
   }
 }

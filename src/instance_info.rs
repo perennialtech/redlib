@@ -129,6 +129,10 @@ impl InstanceInfo {
 				["RSS enabled", &convert(&self.config.enable_rss)],
 				["Full URL", &convert(&self.config.full_url)],
 				["Remove default feeds", &convert(&self.config.default_remove_default_feeds)],
+				["Fingerprinting", &convert(&self.config.fingerprinting)],
+				["Fingerprint max age (s)", &convert(&self.config.fingerprint_max_age_seconds)],
+				["Fingerprint score threshold", &convert(&self.config.fingerprint_score_threshold)],
+				["Fingerprint blocklist", &convert(&self.config.fingerprint_blocklist)],
 				//TODO: fallback to crate::config::DEFAULT_PUSHSHIFT_FRONTEND
 			])
 			.with_header_row(["Settings"]),
@@ -171,6 +175,10 @@ impl InstanceInfo {
 				RSS enabled: {:?}\n
 				Full URL: {:?}\n
 				Remove default feeds: {:?}\n
+				Fingerprinting: {:?}\n
+				Fingerprint max age (s): {:?}\n
+				Fingerprint score threshold: {:?}\n
+				Fingerprint blocklist: {:?}\n
                 Config:\n
                     Banner: {:?}\n
                     Hide awards: {:?}\n
@@ -198,6 +206,10 @@ impl InstanceInfo {
 					self.config.enable_rss,
 					self.config.full_url,
 					self.config.default_remove_default_feeds,
+					self.config.fingerprinting,
+					self.config.fingerprint_max_age_seconds,
+					self.config.fingerprint_score_threshold,
+					self.config.fingerprint_blocklist,
 					self.config.pushshift,
 					self.config.banner,
 					self.config.default_hide_awards,

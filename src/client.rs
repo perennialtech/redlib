@@ -611,7 +611,7 @@ pub async fn rate_limit_check() -> Result<(), String> {
 }
 
 #[cfg(test)]
-use {crate::config::get_setting, sealed_test::prelude::*};
+use sealed_test::prelude::*;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_rate_limit_check() {

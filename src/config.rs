@@ -111,6 +111,29 @@ pub struct Config {
 
 	#[serde(rename = "REDLIB_ARTI_PATH")]
 	pub(crate) arti_path: Option<String>,
+
+	// Fingerprinting gate (instance-level). The secret is intentionally not
+	// serialized (e.g., via /info.json) to avoid leaking it.
+	#[serde(rename = "REDLIB_FINGERPRINTING")]
+	#[serde(alias = "LIBREDDIT_FINGERPRINTING")]
+	pub(crate) fingerprinting: Option<String>,
+
+	#[serde(rename = "REDLIB_FINGERPRINT_MAX_AGE_SECONDS")]
+	#[serde(alias = "LIBREDDIT_FINGERPRINT_MAX_AGE_SECONDS")]
+	pub(crate) fingerprint_max_age_seconds: Option<String>,
+
+	#[serde(rename = "REDLIB_FINGERPRINT_SCORE_THRESHOLD")]
+	#[serde(alias = "LIBREDDIT_FINGERPRINT_SCORE_THRESHOLD")]
+	pub(crate) fingerprint_score_threshold: Option<String>,
+
+	#[serde(rename = "REDLIB_FINGERPRINT_BLOCKLIST")]
+	#[serde(alias = "LIBREDDIT_FINGERPRINT_BLOCKLIST")]
+	pub(crate) fingerprint_blocklist: Option<String>,
+
+	#[serde(rename = "REDLIB_FINGERPRINT_SECRET")]
+	#[serde(alias = "LIBREDDIT_FINGERPRINT_SECRET")]
+	#[serde(skip_serializing)]
+	pub(crate) fingerprint_secret: Option<String>,
 }
 
 impl Config {
@@ -160,6 +183,11 @@ impl Config {
 			full_url: parse("REDLIB_FULL_URL"),
 			default_remove_default_feeds: parse("REDLIB_DEFAULT_REMOVE_DEFAULT_FEEDS"),
 			arti_path: parse("REDLIB_ARTI_PATH"),
+			fingerprinting: parse("REDLIB_FINGERPRINTING"),
+			fingerprint_max_age_seconds: parse("REDLIB_FINGERPRINT_MAX_AGE_SECONDS"),
+			fingerprint_score_threshold: parse("REDLIB_FINGERPRINT_SCORE_THRESHOLD"),
+			fingerprint_blocklist: parse("REDLIB_FINGERPRINT_BLOCKLIST"),
+			fingerprint_secret: parse("REDLIB_FINGERPRINT_SECRET"),
 		}
 	}
 }
@@ -191,6 +219,11 @@ fn get_setting_from_config(name: &str, config: &Config) -> Option<String> {
 		"REDLIB_FULL_URL" => config.full_url.clone(),
 		"REDLIB_DEFAULT_REMOVE_DEFAULT_FEEDS" => config.default_remove_default_feeds.clone(),
 		"REDLIB_ARTI_PATH" => config.arti_path.clone(),
+		"REDLIB_FINGERPRINTING" => config.fingerprinting.clone(),
+		"REDLIB_FINGERPRINT_MAX_AGE_SECONDS" => config.fingerprint_max_age_seconds.clone(),
+		"REDLIB_FINGERPRINT_SCORE_THRESHOLD" => config.fingerprint_score_threshold.clone(),
+		"REDLIB_FINGERPRINT_BLOCKLIST" => config.fingerprint_blocklist.clone(),
+		"REDLIB_FINGERPRINT_SECRET" => config.fingerprint_secret.clone(),
 		_ => None,
 	}
 }

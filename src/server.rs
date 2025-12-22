@@ -27,7 +27,7 @@ use std::{
 };
 use time::OffsetDateTime;
 
-use crate::{config, dbg_msg};
+use crate::{config, dbg_msg, fingerprint};
 
 const BANNED_USER_AGENTS: &[&str] = &[
 	"AI2Bot",
@@ -349,6 +349,33 @@ impl Server {
 						&Method::HEAD => (&Method::GET, true),
 						method => (method, false),
 					};
+
+					// Browser fingerprint gate: serve a blank page until a browser validates.
+					// This intentionally blocks non-browser clients (curl, etc.) by never
+					// issuing the validation cookie.
+					if fingerprint::enabled() && !fingerprint::is_fingerprint_path(&path) {
+						let suspicious = fingerprint::is_suspicious_headers(&req_headers);
+						let verified = fingerprint::verify_cookie(&req);
+						let already_gated = fingerprint::gate_cookie_present(&req);
+
+						if suspicious || !verified {
+							return async move {
+								let mut res = if suspicious || already_gated {
+									fingerprint::blank_response()
+								} else {
+									fingerprint::gate_page_response(&req_headers)
+								};
+								res.headers_mut().extend(def_headers);
+								if is_head {
+									*res.body_mut() = Body::empty();
+								} else {
+									let _ = compress_response(&req_headers, &mut res).await;
+								}
+								Ok(res)
+							}
+							.boxed();
+						}
+					}
 
 					// Match the visited path with an added route
 					match router.recognize(&format!("/{}{}", method.as_str(), path)) {

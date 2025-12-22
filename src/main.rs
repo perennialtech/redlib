@@ -14,7 +14,7 @@ use log::{info, warn};
 use redlib::client::{canonical_path, proxy, rate_limit_check, CLIENT};
 use redlib::server::{self, RequestExt};
 use redlib::utils::{error, redirect, ThemeAssets};
-use redlib::{config, duplicates, headers, instance_info, post, search, settings, subreddit, user};
+use redlib::{config, duplicates, fingerprint, headers, instance_info, post, search, settings, subreddit, user};
 
 use redlib::client::OAUTH_CLIENT;
 
@@ -205,6 +205,8 @@ async fn main() {
 	LazyLock::force(&instance_info::INSTANCE_INFO);
 	info!("Creating OAUTH client.");
 	LazyLock::force(&OAUTH_CLIENT);
+	// Refresh browser version data (Chrome stable + iOS) used for UA age gating.
+	fingerprint::start_ua_versions_daemon();
 
 	// Define default headers (added to all responses)
 	app.default_headers = headers! {
@@ -259,6 +261,10 @@ async fn main() {
 		.at("/check_update.js")
 		.get(|_| resource(include_str!("../static/check_update.js"), "text/javascript", false).boxed());
 	app.at("/copy.js").get(|_| resource(include_str!("../static/copy.js"), "text/javascript", false).boxed());
+
+	// Fingerprinting gate endpoints (blank page is served by middleware).
+	app.at("/__aqua/yurification.js").get(|r| fingerprint::script(r).boxed());
+	app.at("/__aqua/axis_order").post(|r| fingerprint::verify(r).boxed());
 
 	app.at("/commits.atom").get(|_| async move { proxy_commit_info().await }.boxed());
 	app.at("/instances.json").get(|_| async move { proxy_instances().await }.boxed());

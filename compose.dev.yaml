@@ -15,6 +15,11 @@ services:
       # - seccomp=seccomp-redlib.json
     cap_drop:
       - ALL
+    env_file: .env
+    # Redlib runs read-only; Arti (Tor) needs a writable state/cache dir.
+    # `/tmp/arti` is the default when `REDLIB_ARTI_PATH` is unset.
+    tmpfs:
+      - /tmp/arti:rw,mode=1777
     networks:
       - redlib
     healthcheck:

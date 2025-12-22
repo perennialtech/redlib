@@ -181,6 +181,10 @@ Container images for Redlib are available at [quay.io](https://quay.io/repositor
 
 Copy `compose.yaml` and modify any relevant values (for example, the ports Redlib should listen on).
 
+> [!NOTE]
+> Redlib defaults to running with the `tor` feature enabled. If you run the container with `read_only: true`, Arti (Tor) needs a writable directory for its state/cache.
+> `compose.yaml` now mounts a `tmpfs` at `/tmp/arti` and `.env.example` includes `REDLIB_ARTI_PATH=/tmp/arti`.
+
 Start Redlib in detached mode (running in the background):
 
 ```bash
@@ -414,9 +418,16 @@ Assign a default value for each instance-specific setting by passing environment
 | `BANNER`                  | String          | (empty)                | Allows the server to set a banner to be displayed. Currently this is displayed on the instance info page. |
 | `ROBOTS_DISABLE_INDEXING` | `["on", "off"]` | `off`                  | Disables indexing of the instance by search engines.                                                      |
 | `PUSHSHIFT_FRONTEND`      | String          | `undelete.pullpush.io` | Allows the server to set the Pushshift frontend to be used with "removed" links.                          |
+| `ARTI_PATH`               | String          | `/tmp/arti`            | Directory Arti (Tor) uses for state/cache (must be writable).                                             |
 | `PORT`                    | Integer 0-65535 | `8080`                 | The **internal** port Redlib listens on.                                                                  |
 | `ENABLE_RSS`              | `["on", "off"]` | `off`                  | Enables RSS feed generation.                                                                              |
-| `FULL_URL`                | String          | (empty)                | Allows for proper URLs (for now, only needed by RSS)
+| `FULL_URL`                | String          | (empty)                | Allows for proper URLs (for now, only needed by RSS).                                                     |
+| `FINGERPRINTING`          | `["on", "off"]` | `off`                  | Enables the browser fingerprint gate (unverified clients get a blank page).                               |
+| `FINGERPRINT_SECRET`      | String          | (unset)                | Secret used to sign the validation cookie (keep private; not shown in `/info`).                            |
+| `FINGERPRINT_MAX_AGE_SECONDS` | Integer    | `86400`                | How long a successful fingerprint validation is trusted (in seconds).                                     |
+| `FINGERPRINT_SCORE_THRESHOLD` | Integer    | `50`                   | Detection threshold; lower values block more clients.                                                     |
+| `FINGERPRINT_BLOCKLIST`   | Comma-separated hex IDs | (empty)        | Fingerprint IDs to always block (from `/__fp/verify` responses).                                          |
+| `UA` (implicit)           | (auto)          | (auto)             | When fingerprinting is on, UA age gating blocks Chromium-family browsers older than ~11 major versions and iOS Safari older than the current iOS major (fetched from Apple). |
 ## Default user settings
 
 Assign a default value for each user-modifiable setting by passing environment variables to Redlib in the format `REDLIB_DEFAULT_{Y}`. Replace `{Y}` with the setting name (see list below) in capital letters.
