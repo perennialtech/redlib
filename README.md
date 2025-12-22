@@ -66,7 +66,7 @@ For information on instance uptime, see the [Uptime Robot status page](https://s
 # About
 
 > [!NOTE]
-> Find Redlib on 💬 [Matrix](https://matrix.to/#/#redlib:matrix.org), 🐋 [Quay.io](https://quay.io/repository/redlib/redlib), :octocat: [GitHub](https://github.com/redlib-org/redlib), and 🦊 [GitLab](https://gitlab.com/redlib/redlib).
+> Find Redlib on 💬 [Matrix](https://matrix.to/#/#redlib:matrix.org), 🐋 [Container Registry](https://git.ptr.moe/baalajimaestro/redlib), :octocat: [GitHub](https://github.com/redlib-org/redlib), and 🦊 [GitLab](https://gitlab.com/redlib/redlib).
 
 Redlib hopes to provide an easier way to browse Reddit, without the ads, trackers, and bloat. Redlib was inspired by other alternative front-ends to popular services such as [Invidious](https://github.com/iv-org/invidious) for YouTube, [Nitter](https://github.com/zedeus/nitter) for Twitter, and [Bibliogram](https://sr.ht/~cadence/bibliogram/) for Instagram.
 
@@ -176,7 +176,7 @@ For configuration options, see the [Configuration section](#Configuration).
 
 [Docker](https://www.docker.com) lets you run containerized applications. Containers are loosely isolated environments that are lightweight and contain everything needed to run the application, so there's no need to rely on what's installed on the host.
 
-Container images for Redlib are available at [quay.io](https://quay.io/repository/redlib/redlib), with support for `amd64`, `arm64`, and `armv7` platforms.
+Container images for Redlib are available at [git.ptr.moe](https://git.ptr.moe/baalajimaestro/redlib), with support for `amd64`, `arm64`, and `armv7` platforms.
 
 ### Docker Compose
 
@@ -206,15 +206,15 @@ docker logs -f redlib
 Deploy Redlib:
 
 ```bash
-docker pull quay.io/redlib/redlib:latest
-docker run -d --name redlib -p 8080:8080 quay.io/redlib/redlib:latest
+docker pull git.ptr.moe/baalajimaestro/redlib:latest
+docker run -d --name redlib -p 8080:8080 git.ptr.moe/baalajimaestro/redlib:latest
 ```
 
 Deploy using a different port on the host (in this case, port 80):
 
 ```bash
-docker pull quay.io/redlib/redlib:latest
-docker run -d --name redlib -p 80:8080 quay.io/redlib/redlib:latest
+docker pull git.ptr.moe/baalajimaestro/redlib:latest
+docker run -d --name redlib -p 80:8080 git.ptr.moe/baalajimaestro/redlib:latest
 ```
 
 If you're using a reverse proxy in front of Redlib, prefix the port numbers with `127.0.0.1` so that Redlib only listens on the host port **locally**. For example, if the host port for Redlib is `8080`, specify `127.0.0.1:8080:8080`.
@@ -228,7 +228,7 @@ docker logs -f redlib
 
 [Podman](https://podman.io/) lets you run containerized applications in a rootless fashion. Containers are loosely isolated environments that are lightweight and contain everything needed to run the application, so there's no need to rely on what's installed on the host.
 
-Container images for Redlib are available at [quay.io](https://quay.io/repository/redlib/redlib), with support for `amd64`, `arm64`, and `armv7` platforms.
+Container images for Redlib are available at [git.ptr.moe](https://git.ptr.moe/baalajimaestro/redlib), with support for `amd64`, `arm64`, and `armv7` platforms.
 
 ### Quadlets
 
@@ -396,7 +396,7 @@ REDLIB_DEFAULT_USE_HLS = "on"
 > If using the Docker CLI, add ` --env-file .env` to the command that runs Redlib. For example:
 >
 > ```bash
-> docker run -d --name redlib -p 8080:8080 --env-file .env quay.io/redlib/redlib:latest
+> docker run -d --name redlib -p 8080:8080 --env-file .env git.ptr.moe/baalajimaestro/redlib:latest
 > ```
 >
 > If using Docker Compose, no changes are needed as the `.env` file is already referenced in `compose.yaml` via the `env_file: .env` line.
