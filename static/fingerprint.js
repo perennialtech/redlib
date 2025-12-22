@@ -10,10 +10,30 @@
     return (h >>> 0).toString(16).padStart(8, "0");
   }
 
+  function fnv1aBytesHex(bytes) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < bytes.length; i++) {
+      h ^= bytes[i];
+      h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(16).padStart(8, "0");
+  }
+
+  function toU8(input) {
+    if (input instanceof Uint8Array) return input;
+    if (input instanceof ArrayBuffer) return new Uint8Array(input);
+    if (ArrayBuffer.isView(input) && input.buffer) {
+      return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+    }
+    return null;
+  }
+
   async function sha256Hex(input) {
     try {
       if (!crypto || !crypto.subtle || !crypto.subtle.digest) {
-        return typeof input === "string" ? fnv1aHex(input) : "";
+        if (typeof input === "string") return fnv1aHex(input);
+        const u8 = toU8(input);
+        return u8 ? fnv1aBytesHex(u8) : "";
       }
       const data = typeof input === "string" ? enc.encode(input) : input;
       const digest = await crypto.subtle.digest("SHA-256", data);
@@ -22,7 +42,9 @@
       for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, "0");
       return out;
     } catch (_) {
-      return "";
+      if (typeof input === "string") return fnv1aHex(input);
+      const u8 = toU8(input);
+      return u8 ? fnv1aBytesHex(u8) : "";
     }
   }
 
@@ -45,6 +67,66 @@
 
       const dataUrl = canvas.toDataURL();
       return await sha256Hex(dataUrl);
+    } catch (_) {
+      return "";
+    }
+  }
+
+  async function audioHash() {
+    try {
+      const Ctx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+      if (!Ctx) return "";
+
+      const sampleRate = 44100;
+      const length = sampleRate;
+      const ctx = new Ctx(1, length, sampleRate);
+
+      const osc = ctx.createOscillator();
+      osc.type = "triangle";
+      osc.frequency.value = 10000;
+
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = -50;
+      comp.knee.value = 40;
+      comp.ratio.value = 12;
+      comp.attack.value = 0;
+      comp.release.value = 0.25;
+
+      osc.connect(comp);
+      comp.connect(ctx.destination);
+      osc.start(0);
+      // Give the renderer a bounded signal (helps some implementations).
+      try {
+        osc.stop(0.1);
+      } catch (_) {
+        // ignore
+      }
+
+      let buffer;
+      const maybePromise = ctx.startRendering();
+      if (maybePromise && typeof maybePromise.then === "function") {
+        buffer = await maybePromise;
+      } else {
+        buffer = await new Promise((resolve, reject) => {
+          ctx.oncomplete = (e) => resolve(e.renderedBuffer);
+          ctx.onerror = (e) => reject(e);
+          try {
+            ctx.startRendering();
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
+      const data = buffer.getChannelData(0);
+      if (!data || !data.length) return "";
+
+      // Downsample to a small, stable buffer to hash.
+      const sampleCount = 512;
+      const stride = Math.max(1, Math.floor(data.length / sampleCount));
+      const out = new Float32Array(sampleCount);
+      for (let i = 0; i < sampleCount; i++) out[i] = data[i * stride] || 0;
+
+      return await sha256Hex(out);
     } catch (_) {
       return "";
     }
@@ -98,6 +180,9 @@
     try {
       const base = payloadBase();
       base.canvas = await canvasHash();
+      base.audio_supported = !!(window.OfflineAudioContext || window.webkitOfflineAudioContext);
+      // Intentionally always attempt audio fingerprinting; server policy may require it.
+      base.audio = await audioHash();
       const w = webglInfo();
       base.webgl_vendor = w.vendor;
       base.webgl_renderer = w.renderer;

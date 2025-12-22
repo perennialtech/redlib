@@ -59,6 +59,10 @@ struct FingerprintReport {
 	#[serde(default)]
 	canvas: Option<String>,
 	#[serde(default)]
+	audio: Option<String>,
+	#[serde(default)]
+	audio_supported: Option<bool>,
+	#[serde(default)]
 	webgl_vendor: Option<String>,
 	#[serde(default)]
 	webgl_renderer: Option<String>,
@@ -507,6 +511,14 @@ fn evaluate(report: &FingerprintReport, headers: &HeaderMap<HeaderValue>, ua_byt
 		score += 1_000;
 	}
 
+	// Consistency checks ("lie detection"): UA vs. navigator.platform/touch.
+	score += ua_platform_consistency_score(
+		&ua,
+		report.platform.as_deref(),
+		report.max_touch_points.unwrap_or(0),
+		report.touch_event.unwrap_or(false),
+	);
+
 	// Feature mismatch: mobile UA but no touch.
 	let is_mobile_ua = ua.contains("iphone") || ua.contains("ipad") || ua.contains("android");
 	let has_touch = report.max_touch_points.unwrap_or(0) > 0 || report.touch_event.unwrap_or(false);
@@ -517,6 +529,12 @@ fn evaluate(report: &FingerprintReport, headers: &HeaderMap<HeaderValue>, ua_byt
 	// Missing / blocked APIs.
 	if report.canvas.as_deref().unwrap_or_default().is_empty() {
 		score += 50;
+	}
+	// Require AudioContext fingerprinting to succeed.
+	// This is stricter than "audio playback works" and will block environments
+	// that don't support OfflineAudioContext or fail to render deterministically.
+	if report.audio_supported != Some(true) || report.audio.as_deref().unwrap_or_default().is_empty() {
+		score += 35;
 	}
 	if report.webgl_renderer.as_deref().unwrap_or_default().is_empty() {
 		score += 25;
@@ -542,11 +560,91 @@ fn evaluate(report: &FingerprintReport, headers: &HeaderMap<HeaderValue>, ua_byt
 	(score < FP_SETTINGS.score_threshold, fp_id)
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum UaOs {
+	Windows,
+	Mac,
+	Linux,
+	Android,
+	Ios,
+	Unknown,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum PlatformOs {
+	Windows,
+	Mac,
+	Linux,
+	Ios,
+	Unknown,
+}
+
+fn ua_platform_consistency_score(ua_lc: &str, platform: Option<&str>, max_touch_points: u16, touch_event: bool) -> u32 {
+	let ua_os = classify_ua_os(ua_lc);
+	let platform_lc = platform.unwrap_or_default().to_ascii_lowercase();
+	let platform_os = classify_platform_os(&platform_lc);
+
+	// iPadOS often reports navigator.platform = "MacIntel" while UA is iPad + touch.
+	if ua_lc.contains("ipad") && platform_lc.contains("mac") && (max_touch_points > 1 || touch_event) {
+		return 0;
+	}
+
+	// Android typically reports platform values like "Linux armv8l".
+	if ua_os == UaOs::Android && platform_os == PlatformOs::Linux {
+		return 0;
+	}
+
+	match (ua_os, platform_os) {
+		(UaOs::Windows, PlatformOs::Linux | PlatformOs::Mac | PlatformOs::Ios) => 1_000,
+		(UaOs::Mac, PlatformOs::Windows | PlatformOs::Linux) => 1_000,
+		(UaOs::Linux, PlatformOs::Windows | PlatformOs::Mac | PlatformOs::Ios) => 1_000,
+		(UaOs::Ios, PlatformOs::Windows | PlatformOs::Linux) => 1_000,
+		(UaOs::Android, PlatformOs::Windows | PlatformOs::Mac | PlatformOs::Ios) => 1_000,
+		_ => 0,
+	}
+}
+
+fn classify_ua_os(ua_lc: &str) -> UaOs {
+	if ua_lc.contains("android") {
+		return UaOs::Android;
+	}
+	if ua_lc.contains("iphone") || ua_lc.contains("ipad") || ua_lc.contains("ipod") {
+		return UaOs::Ios;
+	}
+	if ua_lc.contains("windows") || ua_lc.contains("win64") || ua_lc.contains("win32") {
+		return UaOs::Windows;
+	}
+	if ua_lc.contains("macintosh") || ua_lc.contains("mac os x") {
+		return UaOs::Mac;
+	}
+	if ua_lc.contains("x11") || (ua_lc.contains("linux") && !ua_lc.contains("android")) {
+		return UaOs::Linux;
+	}
+	UaOs::Unknown
+}
+
+fn classify_platform_os(platform_lc: &str) -> PlatformOs {
+	if platform_lc.contains("win") {
+		return PlatformOs::Windows;
+	}
+	if platform_lc.contains("iphone") || platform_lc.contains("ipad") || platform_lc.contains("ipod") {
+		return PlatformOs::Ios;
+	}
+	if platform_lc.contains("mac") {
+		return PlatformOs::Mac;
+	}
+	if platform_lc.contains("linux") {
+		return PlatformOs::Linux;
+	}
+	PlatformOs::Unknown
+}
+
 fn fingerprint_id(report: &FingerprintReport) -> [u8; 16] {
 	let mut input = Vec::with_capacity(512);
 
 	input.extend_from_slice(b"v1\0");
 	push_opt(&mut input, report.canvas.as_deref());
+	push_opt(&mut input, report.audio.as_deref());
 	push_opt(&mut input, report.webgl_vendor.as_deref());
 	push_opt(&mut input, report.webgl_renderer.as_deref());
 	push_opt(&mut input, report.platform.as_deref());
@@ -738,6 +836,13 @@ mod tests {
 	fn ua_parse_ios_os_major() {
 		let ua = "mozilla/5.0 (iphone; cpu iphone os 26_2 like mac os x) applewebkit/605.1.15 (khtml, like gecko) version/26.0 mobile/15e148 safari/604.1";
 		assert_eq!(parse_ios_os_major(&ua.to_ascii_lowercase()), Some(26));
+	}
+
+	#[test]
+	fn ua_platform_mismatch_windows_linux() {
+		let ua = "mozilla/5.0 (windows nt 10.0; win64; x64) applewebkit/537.36 (khtml, like gecko) chrome/131.0.0.0 safari/537.36";
+		let score = ua_platform_consistency_score(ua, Some("Linux x86_64"), 0, false);
+		assert!(score >= 1_000);
 	}
 
 	// Note: Chrome-family version gating runs before iOS OS-major gating, so
