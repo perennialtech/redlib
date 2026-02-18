@@ -380,7 +380,7 @@ async fn fetch_chrome_stable_major() -> Result<u32, String> {
 		.parse()
 		.map_err(|e| format!("Invalid Chrome VersionHistory URI: {e}"))?;
 
-	let resp = CLIENT.get(uri).await.map_err(|e| format!("Failed to fetch Chrome version: {e}"))?;
+	let resp = CLIENT.load_full().get(uri).await.map_err(|e| format!("Failed to fetch Chrome version: {e}"))?;
 	let bytes = hyper::body::to_bytes(resp.into_body())
 		.await
 		.map_err(|e| format!("Failed to read Chrome version body: {e}"))?;
@@ -397,7 +397,7 @@ async fn fetch_firefox_stable_major() -> Result<u32, String> {
 		.parse()
 		.map_err(|e| format!("Invalid Firefox versions URI: {e}"))?;
 
-	let resp = CLIENT.get(uri).await.map_err(|e| format!("Failed to fetch Firefox version: {e}"))?;
+	let resp = CLIENT.load_full().get(uri).await.map_err(|e| format!("Failed to fetch Firefox version: {e}"))?;
 	let bytes = hyper::body::to_bytes(resp.into_body())
 		.await
 		.map_err(|e| format!("Failed to read Firefox version body: {e}"))?;

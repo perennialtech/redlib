@@ -5,7 +5,7 @@ use crate::{
 	oauth_resources::ANDROID_APP_VERSION_LIST,
 };
 use base64::{engine::general_purpose, Engine as _};
-use hyper::{client, Body, Method, Request};
+use hyper::{Body, Method, Request};
 use log::{error, info, trace, warn};
 use serde_json::json;
 use tegen::tegen::TextGenerator;
@@ -250,7 +250,7 @@ impl OauthBackend for MobileSpoofAuth {
 		trace!("Sending token request...\n\n{request:?}");
 
 		// Send request
-		let client: &std::sync::LazyLock<client::Client<_, Body>> = &CLIENT;
+		let client = CLIENT.load_full();
 		let resp = client.request(request).await?;
 
 		trace!("Received response with status {} and length {:?}", resp.status(), resp.headers().get("content-length"));
@@ -367,7 +367,7 @@ impl OauthBackend for GenericWebAuth {
 		trace!("Sending GenericWebAuth token request...\n\n{request:?}");
 
 		// Send request
-		let client: &std::sync::LazyLock<client::Client<_, Body>> = &CLIENT;
+		let client = CLIENT.load_full();
 		let resp = client.request(request).await?;
 
 		trace!("Received response with status {} and length {:?}", resp.status(), resp.headers().get("content-length"));

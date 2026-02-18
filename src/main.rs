@@ -443,7 +443,7 @@ pub async fn proxy_commit_info() -> Result<Response<Body>, String> {
 async fn fetch_commit_info() -> String {
 	let uri = Uri::from_str("https://github.com/redlib-org/redlib/commits/main.atom").expect("Invalid URI");
 
-	let resp: Body = CLIENT.get(uri).await.expect("Failed to request GitHub").into_body();
+	let resp: Body = CLIENT.load_full().get(uri).await.expect("Failed to request GitHub").into_body();
 
 	hyper::body::to_bytes(resp).await.expect("Failed to read body").iter().copied().map(|x| x as char).collect()
 }
@@ -462,7 +462,7 @@ pub async fn proxy_instances() -> Result<Response<Body>, String> {
 async fn fetch_instances() -> String {
 	let uri = Uri::from_str("https://raw.githubusercontent.com/redlib-org/redlib-instances/refs/heads/main/instances.json").expect("Invalid URI");
 
-	let resp: Body = CLIENT.get(uri).await.expect("Failed to request GitHub").into_body();
+	let resp: Body = CLIENT.load_full().get(uri).await.expect("Failed to request GitHub").into_body();
 
 	hyper::body::to_bytes(resp).await.expect("Failed to read body").iter().copied().map(|x| x as char).collect()
 }

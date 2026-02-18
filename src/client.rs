@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU16};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::{io, result::Result};
 
 #[cfg(feature = "tor")]
@@ -72,14 +72,12 @@ pub static HTTPS_CONNECTOR: LazyLock<HttpsConnector<HttpConnector>> =
 	LazyLock::new(|| HttpsConnector::new());
 
 #[cfg(not(feature = "tor"))]
-pub static CLIENT: LazyLock<Client<HttpsConnector<HttpConnector>>> = LazyLock::new(|| Client::builder().build::<_, Body>(HTTPS_CONNECTOR.clone()));
+pub static CLIENT: LazyLock<ArcSwap<Client<HttpsConnector<HttpConnector>>>> = LazyLock::new(|| ArcSwap::new(Arc::new(Client::builder().build::<_, Body>(HTTPS_CONNECTOR.clone()))));
 
 #[cfg(feature = "tor")]
-pub static TOR_CLIENT: LazyLock<TorClient<PreferredRuntime>> = LazyLock::new(|| {
-	// Use configuration system for Arti directories, default to /tmp/arti
+fn build_tor_config() -> arti_client::TorClientConfig {
 	let arti_path = get_setting("REDLIB_ARTI_PATH").unwrap_or_else(|| "/tmp/arti".to_string());
 
-	// Create the directories if they don't exist
 	let state_dir = format!("{}/state", arti_path);
 	let cache_dir = format!("{}/cache", arti_path);
 	std::fs::create_dir_all(&state_dir).ok();
@@ -92,13 +90,26 @@ pub static TOR_CLIENT: LazyLock<TorClient<PreferredRuntime>> = LazyLock::new(|| 
 		std::path::PathBuf::from(cache_dir)
 	);
 
-	// Disable dormant mode to keep connections active
 	config_builder.address_filter().allow_onion_addrs(true);
 	config_builder.stream_timeouts().connect_timeout(std::time::Duration::from_secs(60));
 
-	let config = config_builder.build().expect("Failed to build Tor client config");
+	config_builder.build().expect("Failed to build Tor client config")
+}
 
-	block_on(async {
+#[cfg(feature = "tor")]
+fn build_http_client(tor_client: TorClient<PreferredRuntime>) -> Client<ArtiHttpConnector<PreferredRuntime, TlsConnector>> {
+	let mut tls_builder = TlsConnector::builder().unwrap();
+	tls_builder.builder.danger_accept_invalid_certs(true);
+	let tls_connector = tls_builder.build().unwrap();
+	let connector = ArtiHttpConnector::new(tor_client, tls_connector);
+	Client::builder().build::<_, Body>(connector)
+}
+
+#[cfg(feature = "tor")]
+pub static TOR_CLIENT: LazyLock<ArcSwap<TorClient<PreferredRuntime>>> = LazyLock::new(|| {
+	let config = build_tor_config();
+
+	let client = block_on(async {
 		info!("Creating and bootstrapping Tor client...");
 		match TorClient::with_runtime(PreferredRuntime::current().expect("Could not get runtime"))
 			.config(config)
@@ -114,17 +125,51 @@ pub static TOR_CLIENT: LazyLock<TorClient<PreferredRuntime>> = LazyLock::new(|| 
 				panic!("Cannot start without Tor connection: {}", e);
 			}
 		}
-	})
+	});
+
+	ArcSwap::new(Arc::new(client))
 });
 
 #[cfg(feature = "tor")]
-pub static CLIENT: LazyLock<Client<ArtiHttpConnector<PreferredRuntime, TlsConnector>>> = LazyLock::new(|| {
-	let mut tls_builder = TlsConnector::builder().unwrap();
-	tls_builder.builder.danger_accept_invalid_certs(true);
-	let tls_connector = tls_builder.build().unwrap();
-	let connector = ArtiHttpConnector::new(TOR_CLIENT.clone(), tls_connector);
-	Client::builder().build::<_, Body>(connector)
+pub static CLIENT: LazyLock<ArcSwap<Client<ArtiHttpConnector<PreferredRuntime, TlsConnector>>>> = LazyLock::new(|| {
+	let tor_client = (**TOR_CLIENT.load()).clone();
+	ArcSwap::new(Arc::new(build_http_client(tor_client)))
 });
+
+#[cfg(feature = "tor")]
+static TOR_IS_REBUILDING: AtomicBool = AtomicBool::new(false);
+
+/// Rebuild the Tor client and HTTP client when circuits are broken.
+/// Uses an atomic flag to prevent concurrent rebuilds.
+#[cfg(feature = "tor")]
+async fn rebuild_tor_connection() {
+	// If already rebuilding, don't start another one
+	if TOR_IS_REBUILDING.swap(true, Ordering::SeqCst) {
+		info!("Tor circuit rebuild already in progress, skipping");
+		return;
+	}
+
+	warn!("Rebuilding Tor client due to connection failure...");
+	let config = build_tor_config();
+
+	match TorClient::with_runtime(PreferredRuntime::current().expect("Could not get runtime"))
+		.config(config)
+		.create_bootstrapped()
+		.await
+	{
+		Ok(new_tor) => {
+			let new_http = build_http_client(new_tor.clone());
+			TOR_CLIENT.store(Arc::new(new_tor));
+			CLIENT.store(Arc::new(new_http));
+			info!("Tor client rebuilt successfully");
+		}
+		Err(e) => {
+			error!("Failed to rebuild Tor client: {}", e);
+		}
+	}
+
+	TOR_IS_REBUILDING.store(false, Ordering::SeqCst);
+}
 
 pub static OAUTH_CLIENT: LazyLock<ArcSwap<Oauth>> = LazyLock::new(|| {
 	let client = block_on(Oauth::new());
@@ -245,7 +290,7 @@ async fn stream(url: &str, req: &Request<Body>) -> Result<Response<Body>, String
 	let parsed_uri = url.parse::<Uri>().map_err(|_| "Couldn't parse URL".to_string())?;
 
 	// Build the hyper client from the HTTPS connector or Tor connector.
-	let client: &LazyLock<Client<_, Body>> = &CLIENT;
+	let client = CLIENT.load_full();
 
 	let mut builder = Request::get(parsed_uri);
 
@@ -305,21 +350,11 @@ fn reddit_short_head(path: String, quarantine: bool, base_path: &'static str, ho
 // }
 // Unused - reddit_head is only ever called in the context of a short URL
 
-/// Makes a request to Reddit. If `redirect` is `true`, `request_with_redirect`
-/// will recurse on the URL that Reddit provides in the Location HTTP header
-/// in its response.
-fn request(method: &'static Method, path: String, redirect: bool, quarantine: bool, base_path: &'static str, host: &'static str) -> Boxed<Result<Response<Body>, String>> {
-	// Build Reddit URL from path.
-	let url = format!("{base_path}{path}");
-
-	// Construct the hyper client from the HTTPS connector or Tor connector.
-	let client: &LazyLock<Client<_, Body>> = &CLIENT;
-
-	// Build request to Reddit. When making a GET, request gzip compression.
-	// (Reddit doesn't do brotli yet.)
+/// Build a Reddit API request with shuffled headers.
+fn build_reddit_request(method: &Method, url: &str, quarantine: bool, host: &str) -> Result<Request<Body>, String> {
 	let mut headers: Vec<(String, String)> = vec![
 		("Host".into(), host.into()),
-		("Accept-Encoding".into(), if method == Method::GET { "gzip".into() } else { "identity".into() }),
+		("Accept-Encoding".into(), if *method == Method::GET { "gzip".into() } else { "identity".into() }),
 		(
 			"Cookie".into(),
 			if quarantine {
@@ -340,115 +375,136 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 	// shuffle headers: https://github.com/redlib-org/redlib/issues/324
 	fastrand::shuffle(&mut headers);
 
-	let mut builder = Request::builder().method(method).uri(&url);
+	let mut builder = Request::builder().method(method).uri(url);
 
 	for (key, value) in headers {
 		builder = builder.header(key, value);
 	}
 
-	let builder = builder.body(Body::empty());
+	builder.body(Body::empty()).map_err(|_| "Post url contains non-ASCII characters".to_string())
+}
 
-	async move {
-		match builder {
-			Ok(req) => match client.request(req).await {
-				Ok(mut response) => {
-					// Reddit may respond with a 3xx. Decide whether or not to
-					// redirect based on caller params.
-					if response.status().is_redirection() {
-						if !redirect {
-							return Ok(response);
-						};
-						let location_header = response.headers().get(header::LOCATION);
-						if location_header == Some(&HeaderValue::from_static(ALTERNATIVE_REDDIT_URL_BASE)) {
-							return Err("Reddit response was invalid".to_string());
-						}
-						return request(
-							method,
-							location_header
-								.map(|val| {
-									// We need to make adjustments to the URI
-									// we get back from Reddit. Namely, we
-									// must:
-									//
-									//     1. Remove the authority (e.g.
-									//     https://www.reddit.com) that may be
-									//     present, so that we recurse on the
-									//     path (and query parameters) as
-									//     required.
-									//
-									//     2. Percent-encode the path.
-									let new_path = percent_encode(val.as_bytes(), CONTROLS)
-										.to_string()
-										.trim_start_matches(REDDIT_URL_BASE)
-										.trim_start_matches(ALTERNATIVE_REDDIT_URL_BASE)
-										.to_string();
-									format!("{new_path}{}raw_json=1", if new_path.contains('?') { "&" } else { "?" })
-								})
-								.unwrap_or_default()
-								.to_string(),
-							true,
-							quarantine,
-							base_path,
-							host,
-						)
-						.await;
-					};
+/// Execute a single request attempt against Reddit, handling redirects and decompression.
+async fn execute_request(method: &'static Method, path: &str, redirect: bool, quarantine: bool, base_path: &'static str, host: &'static str) -> Result<Response<Body>, String> {
+	let url = format!("{base_path}{path}");
+	let client = CLIENT.load_full();
 
-					match response.headers().get(header::CONTENT_ENCODING) {
-						// Content not compressed.
-						None => Ok(response),
+	let req = build_reddit_request(method, &url, quarantine, host)?;
 
-						// Content encoded (hopefully with gzip).
-						Some(hdr) => {
-							match hdr.to_str() {
-								Ok(val) => match val {
-									"gzip" => {}
-									"identity" => return Ok(response),
-									_ => return Err("Reddit response was encoded with an unsupported compressor".to_string()),
-								},
-								Err(_) => return Err("Reddit response was invalid".to_string()),
-							}
+	match client.request(req).await {
+		Ok(mut response) => {
+			// Reddit may respond with a 3xx. Decide whether or not to
+			// redirect based on caller params.
+			if response.status().is_redirection() {
+				if !redirect {
+					return Ok(response);
+				};
+				let location_header = response.headers().get(header::LOCATION);
+				if location_header == Some(&HeaderValue::from_static(ALTERNATIVE_REDDIT_URL_BASE)) {
+					return Err("Reddit response was invalid".to_string());
+				}
+				return request(
+					method,
+					location_header
+						.map(|val| {
+							// We need to make adjustments to the URI
+							// we get back from Reddit. Namely, we
+							// must:
+							//
+							//     1. Remove the authority (e.g.
+							//     https://www.reddit.com) that may be
+							//     present, so that we recurse on the
+							//     path (and query parameters) as
+							//     required.
+							//
+							//     2. Percent-encode the path.
+							let new_path = percent_encode(val.as_bytes(), CONTROLS)
+								.to_string()
+								.trim_start_matches(REDDIT_URL_BASE)
+								.trim_start_matches(ALTERNATIVE_REDDIT_URL_BASE)
+								.to_string();
+							format!("{new_path}{}raw_json=1", if new_path.contains('?') { "&" } else { "?" })
+						})
+						.unwrap_or_default()
+						.to_string(),
+					true,
+					quarantine,
+					base_path,
+					host,
+				)
+				.await;
+			};
 
-							// We get here if the body is gzip-compressed.
+			match response.headers().get(header::CONTENT_ENCODING) {
+				// Content not compressed.
+				None => Ok(response),
 
-							// The body must be something that implements
-							// std::io::Read, hence the conversion to
-							// bytes::buf::Buf and then transformation into a
-							// Reader.
-							let mut decompressed: Vec<u8>;
-							{
-								let mut aggregated_body = match body::aggregate(response.body_mut()).await {
-									Ok(b) => b.reader(),
-									Err(e) => return Err(e.to_string()),
-								};
-
-								let mut decoder = match gzip::Decoder::new(&mut aggregated_body) {
-									Ok(decoder) => decoder,
-									Err(e) => return Err(e.to_string()),
-								};
-
-								decompressed = Vec::<u8>::new();
-								if let Err(e) = io::copy(&mut decoder, &mut decompressed) {
-									return Err(e.to_string());
-								};
-							}
-
-							response.headers_mut().remove(header::CONTENT_ENCODING);
-							response.headers_mut().insert(header::CONTENT_LENGTH, decompressed.len().into());
-							*(response.body_mut()) = Body::from(decompressed);
-
-							Ok(response)
-						}
+				// Content encoded (hopefully with gzip).
+				Some(hdr) => {
+					match hdr.to_str() {
+						Ok(val) => match val {
+							"gzip" => {}
+							"identity" => return Ok(response),
+							_ => return Err("Reddit response was encoded with an unsupported compressor".to_string()),
+						},
+						Err(_) => return Err("Reddit response was invalid".to_string()),
 					}
-				}
-				Err(e) => {
-					dbg_msg!("{method} {REDDIT_URL_BASE}{path}: {}", e);
 
-					Err(e.to_string())
+					// We get here if the body is gzip-compressed.
+
+					// The body must be something that implements
+					// std::io::Read, hence the conversion to
+					// bytes::buf::Buf and then transformation into a
+					// Reader.
+					let mut decompressed: Vec<u8>;
+					{
+						let mut aggregated_body = match body::aggregate(response.body_mut()).await {
+							Ok(b) => b.reader(),
+							Err(e) => return Err(e.to_string()),
+						};
+
+						let mut decoder = match gzip::Decoder::new(&mut aggregated_body) {
+							Ok(decoder) => decoder,
+							Err(e) => return Err(e.to_string()),
+						};
+
+						decompressed = Vec::<u8>::new();
+						if let Err(e) = io::copy(&mut decoder, &mut decompressed) {
+							return Err(e.to_string());
+						};
+					}
+
+					response.headers_mut().remove(header::CONTENT_ENCODING);
+					response.headers_mut().insert(header::CONTENT_LENGTH, decompressed.len().into());
+					*(response.body_mut()) = Body::from(decompressed);
+
+					Ok(response)
 				}
-			},
-			Err(_) => Err("Post url contains non-ASCII characters".to_string()),
+			}
 		}
+		Err(e) => {
+			dbg_msg!("{method} {REDDIT_URL_BASE}{path}: {}", e);
+			Err(e.to_string())
+		}
+	}
+}
+
+/// Makes a request to Reddit. If `redirect` is `true`, `request_with_redirect`
+/// will recurse on the URL that Reddit provides in the Location HTTP header
+/// in its response. On Tor, connection failures trigger a circuit rebuild and
+/// a single retry.
+fn request(method: &'static Method, path: String, redirect: bool, quarantine: bool, base_path: &'static str, host: &'static str) -> Boxed<Result<Response<Body>, String>> {
+	async move {
+		let result = execute_request(method, &path, redirect, quarantine, base_path, host).await;
+
+		#[cfg(feature = "tor")]
+		if result.is_err() {
+			warn!("Request to {path} failed over Tor, rebuilding circuit and retrying...");
+			rebuild_tor_connection().await;
+			return execute_request(method, &path, redirect, quarantine, base_path, host).await;
+		}
+
+		result
 	}
 	.boxed()
 }
