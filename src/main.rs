@@ -9,8 +9,10 @@ use std::sync::LazyLock;
 
 use futures_lite::FutureExt;
 use hyper::Uri;
-use hyper::{header::HeaderValue, Body, Request, Response};
+use hyper::{header::HeaderValue, Request, Response};
+use http_body_util::BodyExt;
 use log::{info, warn};
+use redlib::body::{Body, full, empty};
 use redlib::client::{canonical_path, proxy, rate_limit_check, CLIENT};
 use redlib::server::{self, RequestExt};
 use redlib::utils::{error, redirect, ThemeAssets};
@@ -26,8 +28,8 @@ async fn pwa_logo() -> Result<Response<Body>, String> {
 		Response::builder()
 			.status(200)
 			.header("content-type", "image/png")
-			.body(include_bytes!("../static/logo.png").as_ref().into())
-			.unwrap_or_default(),
+			.body(full(bytes::Bytes::from_static(include_bytes!("../static/logo.png"))))
+			.unwrap(),
 	)
 }
 
@@ -37,8 +39,8 @@ async fn iphone_logo() -> Result<Response<Body>, String> {
 		Response::builder()
 			.status(200)
 			.header("content-type", "image/png")
-			.body(include_bytes!("../static/apple-touch-icon.png").as_ref().into())
-			.unwrap_or_default(),
+			.body(full(bytes::Bytes::from_static(include_bytes!("../static/apple-touch-icon.png"))))
+			.unwrap(),
 	)
 }
 
@@ -48,8 +50,8 @@ async fn favicon() -> Result<Response<Body>, String> {
 			.status(200)
 			.header("content-type", "image/vnd.microsoft.icon")
 			.header("Cache-Control", "public, max-age=1209600, s-maxage=86400")
-			.body(include_bytes!("../static/favicon.ico").as_ref().into())
-			.unwrap_or_default(),
+			.body(full(bytes::Bytes::from_static(include_bytes!("../static/favicon.ico"))))
+			.unwrap(),
 	)
 }
 
@@ -59,8 +61,8 @@ async fn font() -> Result<Response<Body>, String> {
 			.status(200)
 			.header("content-type", "font/woff2")
 			.header("Cache-Control", "public, max-age=1209600, s-maxage=86400")
-			.body(include_bytes!("../static/Inter.var.woff2").as_ref().into())
-			.unwrap_or_default(),
+			.body(full(bytes::Bytes::from_static(include_bytes!("../static/Inter.var.woff2"))))
+			.unwrap(),
 	)
 }
 
@@ -70,8 +72,8 @@ async fn opensearch() -> Result<Response<Body>, String> {
 			.status(200)
 			.header("content-type", "application/opensearchdescription+xml")
 			.header("Cache-Control", "public, max-age=1209600, s-maxage=86400")
-			.body(include_bytes!("../static/opensearch.xml").as_ref().into())
-			.unwrap_or_default(),
+			.body(full(bytes::Bytes::from_static(include_bytes!("../static/opensearch.xml"))))
+			.unwrap(),
 	)
 }
 
@@ -79,8 +81,8 @@ async fn resource(body: &str, content_type: &str, cache: bool) -> Result<Respons
 	let mut res = Response::builder()
 		.status(200)
 		.header("content-type", content_type)
-		.body(body.to_string().into())
-		.unwrap_or_default();
+		.body(full(body.to_string()))
+		.unwrap();
 
 	if cache {
 		if let Ok(val) = HeaderValue::from_str("public, max-age=1209600, s-maxage=86400") {
@@ -103,8 +105,8 @@ async fn style() -> Result<Response<Body>, String> {
 			.status(200)
 			.header("content-type", "text/css")
 			.header("Cache-Control", "public, max-age=1209600, s-maxage=86400")
-			.body(res.to_string().into())
-			.unwrap_or_default(),
+			.body(full(res))
+			.unwrap(),
 	)
 }
 
@@ -434,8 +436,8 @@ pub async fn proxy_commit_info() -> Result<Response<Body>, String> {
 		Response::builder()
 			.status(200)
 			.header("content-type", "application/atom+xml")
-			.body(Body::from(fetch_commit_info().await))
-			.unwrap_or_default(),
+			.body(full(fetch_commit_info().await))
+			.unwrap(),
 	)
 }
 
@@ -443,9 +445,10 @@ pub async fn proxy_commit_info() -> Result<Response<Body>, String> {
 async fn fetch_commit_info() -> String {
 	let uri = Uri::from_str("https://github.com/redlib-org/redlib/commits/main.atom").expect("Invalid URI");
 
-	let resp: Body = CLIENT.load_full().get(uri).await.expect("Failed to request GitHub").into_body();
+	let req = Request::get(uri).body(empty()).expect("Failed to build request");
+	let resp = CLIENT.load_full().request(req).await.expect("Failed to request GitHub");
 
-	hyper::body::to_bytes(resp).await.expect("Failed to read body").iter().copied().map(|x| x as char).collect()
+	resp.into_body().collect().await.expect("Failed to read body").to_bytes().iter().copied().map(|x| x as char).collect()
 }
 
 pub async fn proxy_instances() -> Result<Response<Body>, String> {
@@ -453,8 +456,8 @@ pub async fn proxy_instances() -> Result<Response<Body>, String> {
 		Response::builder()
 			.status(200)
 			.header("content-type", "application/json")
-			.body(Body::from(fetch_instances().await))
-			.unwrap_or_default(),
+			.body(full(fetch_instances().await))
+			.unwrap(),
 	)
 }
 
@@ -462,7 +465,8 @@ pub async fn proxy_instances() -> Result<Response<Body>, String> {
 async fn fetch_instances() -> String {
 	let uri = Uri::from_str("https://raw.githubusercontent.com/redlib-org/redlib-instances/refs/heads/main/instances.json").expect("Invalid URI");
 
-	let resp: Body = CLIENT.load_full().get(uri).await.expect("Failed to request GitHub").into_body();
+	let req = Request::get(uri).body(empty()).expect("Failed to build request");
+	let resp = CLIENT.load_full().request(req).await.expect("Failed to request GitHub");
 
-	hyper::body::to_bytes(resp).await.expect("Failed to read body").iter().copied().map(|x| x as char).collect()
+	resp.into_body().collect().await.expect("Failed to read body").to_bytes().iter().copied().map(|x| x as char).collect()
 }

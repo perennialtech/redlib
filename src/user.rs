@@ -8,7 +8,8 @@ use crate::{config, utils};
 use askama::Template;
 use chrono::DateTime;
 use htmlescape::decode_html;
-use hyper::{Body, Request, Response};
+use hyper::{Request, Response};
+use crate::body::{Body, full};
 use time::{macros::format_description, OffsetDateTime};
 
 // STRUCTS
@@ -179,7 +180,7 @@ pub async fn rss(req: Request<Body>) -> Result<Response<Body>, String> {
 	let body = channel.to_string().into_bytes();
 
 	// Create the HTTP response
-	let mut res = Response::new(Body::from(body));
+	let mut res = Response::new(full(body));
 	res.headers_mut().insert(CONTENT_TYPE, hyper::header::HeaderValue::from_static("application/rss+xml"));
 
 	Ok(res)

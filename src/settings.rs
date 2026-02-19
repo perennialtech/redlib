@@ -8,8 +8,9 @@ use crate::subreddit::join_until_size_limit;
 use crate::utils::{deflate_decompress, redirect, template, Preferences};
 use askama::Template;
 use cookie::Cookie;
-use futures_lite::StreamExt;
-use hyper::{Body, Request, Response};
+use hyper::{Request, Response};
+use http_body_util::BodyExt;
+use crate::body::Body;
 use time::{Duration, OffsetDateTime};
 use tokio::time::timeout;
 use url::form_urlencoded;
@@ -60,7 +61,7 @@ pub async fn get(req: Request<Body>) -> Result<Response<Body>, String> {
 /// Set cookies using response "Set-Cookie" header
 pub async fn set(req: Request<Body>) -> Result<Response<Body>, String> {
 	// Split the body into parts
-	let (parts, mut body) = req.into_parts();
+	let (parts, body) = req.into_parts();
 
 	// Grab existing cookies
 	let _cookies: Vec<Cookie<'_>> = parts
@@ -71,14 +72,10 @@ pub async fn set(req: Request<Body>) -> Result<Response<Body>, String> {
 		.collect();
 
 	// Aggregate the body...
-	// let whole_body = hyper::body::aggregate(req).await.map_err(|e| e.to_string())?;
-	let body_bytes = body
-		.try_fold(Vec::new(), |mut data, chunk| {
-			data.extend_from_slice(&chunk);
-			Ok(data)
-		})
+	let body_bytes = body.collect()
 		.await
-		.map_err(|e| e.to_string())?;
+		.map_err(|e| e.to_string())?
+		.to_bytes();
 
 	let form = url::form_urlencoded::parse(&body_bytes).collect::<HashMap<_, _>>();
 
@@ -273,9 +270,9 @@ pub async fn update(req: Request<Body>) -> Result<Response<Body>, String> {
 }
 
 pub async fn encoded_restore(req: Request<Body>) -> Result<Response<Body>, String> {
-	let body = hyper::body::to_bytes(req.into_body())
+	let body = req.into_body().collect()
 		.await
-		.map_err(|e| format!("Failed to get bytes from request body: {e}"))?;
+		.map_err(|e| format!("Failed to get bytes from request body: {e}"))?.to_bytes();
 
 	if body.len() > 1024 * 1024 {
 		return Err("Request body too large".to_string());

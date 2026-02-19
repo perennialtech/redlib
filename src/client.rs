@@ -1,14 +1,17 @@
 use arc_swap::ArcSwap;
+use bytes::Buf;
 use cached::proc_macro::cached;
 use futures_lite::future::block_on;
 use futures_lite::{future::Boxed, FutureExt};
 use hyper::header::HeaderValue;
-use hyper::{body, body::Buf, header, Body, Client, Method, Request, Response, Uri};
-#[cfg(not(feature = "tor"))]
-use hyper::client::HttpConnector;
-#[cfg(not(feature = "tor"))]
-use hyper_tls::HttpsConnector;
+use hyper::{header, Method, Request, Response, Uri};
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::TokioExecutor;
+use http_body_util::BodyExt;
 use libflate::gzip;
+#[cfg(not(feature = "tor"))]
+use log::{error, trace, warn};
+#[cfg(feature = "tor")]
 use log::{error, info, trace, warn};
 use percent_encoding::{percent_encode, CONTROLS};
 use serde_json::Value;
@@ -18,24 +21,25 @@ use std::sync::atomic::{AtomicBool, AtomicU16};
 use std::sync::{Arc, LazyLock};
 use std::{io, result::Result};
 
+use crate::body::{Body, full, empty};
+use crate::dbg_msg;
+#[cfg(any(feature = "tor", test))]
+use crate::config::get_setting;
+use crate::oauth::{force_refresh_token, token_daemon, Oauth, OauthBackendImpl};
+use crate::server::RequestExt;
+use crate::utils::{format_url, Post};
+
+#[cfg(not(feature = "tor"))]
+use hyper_util::client::legacy::connect::HttpConnector;
+#[cfg(not(feature = "tor"))]
+use hyper_tls::HttpsConnector;
+
 #[cfg(feature = "tor")]
 use arti_client::TorClient;
 #[cfg(feature = "tor")]
 use arti_client::config::TorClientConfigBuilder;
 #[cfg(feature = "tor")]
-use arti_hyper::ArtiHttpConnector;
-#[cfg(feature = "tor")]
 use tor_rtcompat::PreferredRuntime;
-#[cfg(feature = "tor")]
-use tls_api::{TlsConnector as TlsConnectorTrait, TlsConnectorBuilder};
-#[cfg(feature = "tor")]
-use tls_api_native_tls::TlsConnector;
-
-use crate::dbg_msg;
-use crate::config::get_setting;
-use crate::oauth::{force_refresh_token, token_daemon, Oauth, OauthBackendImpl};
-use crate::server::RequestExt;
-use crate::utils::{format_url, Post};
 
 #[cfg(not(feature = "tor"))]
 const REDDIT_URL_BASE: &str = "https://oauth.reddit.com";
@@ -67,12 +71,20 @@ const ALTERNATIVE_REDDIT_URL_BASE: &str = "https://www.reddittorjg6rue252oqsxryo
 #[cfg(feature = "tor")]
 const ALTERNATIVE_REDDIT_URL_BASE_HOST: &str = "www.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion";
 
+// --- Non-Tor client ---
+
 #[cfg(not(feature = "tor"))]
 pub static HTTPS_CONNECTOR: LazyLock<HttpsConnector<HttpConnector>> =
 	LazyLock::new(|| HttpsConnector::new());
 
 #[cfg(not(feature = "tor"))]
-pub static CLIENT: LazyLock<ArcSwap<Client<HttpsConnector<HttpConnector>>>> = LazyLock::new(|| ArcSwap::new(Arc::new(Client::builder().build::<_, Body>(HTTPS_CONNECTOR.clone()))));
+pub static CLIENT: LazyLock<ArcSwap<Client<HttpsConnector<HttpConnector>, Body>>> = LazyLock::new(|| {
+	ArcSwap::new(Arc::new(
+		Client::builder(TokioExecutor::new()).build::<_, Body>(HTTPS_CONNECTOR.clone()),
+	))
+});
+
+// --- Tor client ---
 
 #[cfg(feature = "tor")]
 fn build_tor_config() -> arti_client::TorClientConfig {
@@ -82,6 +94,9 @@ fn build_tor_config() -> arti_client::TorClientConfig {
 	let cache_dir = format!("{}/cache", arti_path);
 	std::fs::create_dir_all(&state_dir).ok();
 	std::fs::create_dir_all(&cache_dir).ok();
+
+	use std::os::unix::fs::PermissionsExt;
+	std::fs::set_permissions(&arti_path, std::fs::Permissions::from_mode(0o700)).ok();
 
 	info!("Using Arti directories - State: {}, Cache: {}", state_dir, cache_dir);
 
@@ -96,13 +111,138 @@ fn build_tor_config() -> arti_client::TorClientConfig {
 	config_builder.build().expect("Failed to build Tor client config")
 }
 
+// Custom Tor connector implementing tower::Service<Uri>
 #[cfg(feature = "tor")]
-fn build_http_client(tor_client: TorClient<PreferredRuntime>) -> Client<ArtiHttpConnector<PreferredRuntime, TlsConnector>> {
-	let mut tls_builder = TlsConnector::builder().unwrap();
-	tls_builder.builder.danger_accept_invalid_certs(true);
-	let tls_connector = tls_builder.build().unwrap();
-	let connector = ArtiHttpConnector::new(tor_client, tls_connector);
-	Client::builder().build::<_, Body>(connector)
+mod tor_connector {
+	use super::*;
+	use arti_client::DataStream;
+	use hyper::rt::{Read, Write, ReadBufCursor};
+	use hyper_util::client::legacy::connect::Connection;
+	use hyper_util::rt::TokioIo;
+	use pin_project_lite::pin_project;
+	use std::future::Future;
+	use std::pin::Pin;
+	use std::task::{Context, Poll};
+
+	pin_project! {
+		/// A stream that is either a raw Tor DataStream or a TLS-wrapped one.
+		/// Inner types are wrapped in TokioIo to bridge tokio AsyncRead/AsyncWrite
+		/// to hyper's rt::Read/rt::Write traits.
+		#[project = TorStreamProj]
+		pub enum TorStream {
+			Plain { #[pin] inner: TokioIo<DataStream> },
+			Tls { #[pin] inner: TokioIo<tokio_native_tls::TlsStream<DataStream>> },
+		}
+	}
+
+	impl Read for TorStream {
+		fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: ReadBufCursor<'_>) -> Poll<io::Result<()>> {
+			match self.project() {
+				TorStreamProj::Plain { inner } => inner.poll_read(cx, buf),
+				TorStreamProj::Tls { inner } => inner.poll_read(cx, buf),
+			}
+		}
+	}
+
+	impl Write for TorStream {
+		fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+			match self.project() {
+				TorStreamProj::Plain { inner } => inner.poll_write(cx, buf),
+				TorStreamProj::Tls { inner } => inner.poll_write(cx, buf),
+			}
+		}
+
+		fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+			match self.project() {
+				TorStreamProj::Plain { inner } => inner.poll_flush(cx),
+				TorStreamProj::Tls { inner } => inner.poll_flush(cx),
+			}
+		}
+
+		fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+			match self.project() {
+				TorStreamProj::Plain { inner } => inner.poll_shutdown(cx),
+				TorStreamProj::Tls { inner } => inner.poll_shutdown(cx),
+			}
+		}
+	}
+
+	impl Connection for TorStream {
+		fn connected(&self) -> hyper_util::client::legacy::connect::Connected {
+			hyper_util::client::legacy::connect::Connected::new()
+		}
+	}
+
+	#[derive(Clone)]
+	pub struct ArtiConnector {
+		tor_client: TorClient<PreferredRuntime>,
+		tls_connector: tokio_native_tls::TlsConnector,
+	}
+
+	impl ArtiConnector {
+		pub fn new(tor_client: TorClient<PreferredRuntime>) -> Self {
+			let native_connector = tokio_native_tls::native_tls::TlsConnector::builder()
+				.danger_accept_invalid_certs(true)
+				.danger_accept_invalid_hostnames(true)
+				.build()
+				.expect("Failed to build native TLS connector");
+			Self {
+				tor_client,
+				tls_connector: tokio_native_tls::TlsConnector::from(native_connector),
+			}
+		}
+	}
+
+	impl tower::Service<Uri> for ArtiConnector {
+		type Response = TorStream;
+		type Error = Box<dyn std::error::Error + Send + Sync>;
+		type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+		fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Ok(()))
+		}
+
+		fn call(&mut self, uri: Uri) -> Self::Future {
+			let tor_client = self.tor_client.clone();
+			let tls_connector = self.tls_connector.clone();
+
+			Box::pin(async move {
+				let host = uri.host().ok_or("URI has no host")?;
+				let port = uri.port_u16().unwrap_or(match uri.scheme_str() {
+					Some("https") => 443,
+					_ => 80,
+				});
+
+				let data_stream = tor_client
+					.connect((host, port))
+					.await
+					.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+
+				let is_https = uri.scheme_str() == Some("https");
+
+				if is_https {
+					// Wrap with TLS for HTTPS (including .onion HTTPS endpoints)
+					let tls_stream = tls_connector
+						.connect(host, data_stream)
+						.await
+						.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+					Ok(TorStream::Tls { inner: TokioIo::new(tls_stream) })
+				} else {
+					// Plain for HTTP
+					Ok(TorStream::Plain { inner: TokioIo::new(data_stream) })
+				}
+			})
+		}
+	}
+}
+
+#[cfg(feature = "tor")]
+use tor_connector::ArtiConnector;
+
+#[cfg(feature = "tor")]
+fn build_http_client(tor_client: TorClient<PreferredRuntime>) -> Client<ArtiConnector, Body> {
+	let connector = ArtiConnector::new(tor_client);
+	Client::builder(TokioExecutor::new()).build::<_, Body>(connector)
 }
 
 #[cfg(feature = "tor")]
@@ -131,7 +271,7 @@ pub static TOR_CLIENT: LazyLock<ArcSwap<TorClient<PreferredRuntime>>> = LazyLock
 });
 
 #[cfg(feature = "tor")]
-pub static CLIENT: LazyLock<ArcSwap<Client<ArtiHttpConnector<PreferredRuntime, TlsConnector>>>> = LazyLock::new(|| {
+pub static CLIENT: LazyLock<ArcSwap<Client<ArtiConnector, Body>>> = LazyLock::new(|| {
 	let tor_client = (**TOR_CLIENT.load()).clone();
 	ArcSwap::new(Arc::new(build_http_client(tor_client)))
 });
@@ -207,7 +347,6 @@ pub async fn canonical_path(path: String, tries: i8) -> Result<Option<String>, S
 
 	// for each URL pair, try the HEAD request
 	let res = {
-		// for url base and host in URL_PAIRS, try reddit_short_head(path.clone(), true, url_base, url_base_host) and if it succeeds, set res. else, res = None
 		let mut res = None;
 		for (url_base, url_base_host) in URL_PAIRS {
 			res = reddit_short_head(path.clone(), true, url_base, url_base_host).await.ok();
@@ -235,17 +374,7 @@ pub async fn canonical_path(path: String, tries: i8) -> Result<Option<String>, S
 					return Err("Unable to decode Location header.".to_string());
 				};
 
-				// We need to strip the .json suffix from the original path.
-				// In addition, we want to remove share parameters.
-				// Cut it off here instead of letting it propagate all the way
-				// to main.rs
 				let stripped_uri = original.strip_suffix(".json").unwrap_or(original).split('?').next().unwrap_or_default();
-
-				// The reason why we now have to format_url, is because the new OAuth
-				// endpoints seem to return full paths, instead of relative paths.
-				// So we need to strip the .json suffix from the original path, and
-				// also remove all Reddit domain parts with format_url.
-				// Otherwise, it will literally redirect to Reddit.com.
 				let uri = format_url(stripped_uri);
 
 				// Decrement tries and try again
@@ -254,14 +383,12 @@ pub async fn canonical_path(path: String, tries: i8) -> Result<Option<String>, S
 			None => Ok(None),
 		},
 
-		// If Reddit responds with anything other than 3xx (except for the 2xx and 301
-		// as above), return a None.
 		300..=399 => Ok(None),
 
 		// Rate limiting
 		429 => Err("Too many requests.".to_string()),
 
-		// Special condition rate limiting - https://github.com/redlib-org/redlib/issues/229
+		// Special condition rate limiting
 		403 if policy_error => Err("Too many requests.".to_string()),
 
 		_ => Ok(
@@ -307,12 +434,17 @@ async fn stream(url: &str, req: &Request<Body>) -> Result<Response<Body>, String
 		builder = builder.header("User-Agent", client.user_agent());
 	}
 
-	let stream_request = builder.body(Body::empty()).map_err(|_| "Couldn't build empty body in stream".to_string())?;
+	let stream_request = builder.body(empty()).map_err(|_| "Couldn't build empty body in stream".to_string())?;
 
 	client
 		.request(stream_request)
 		.await
-		.map(|mut res| {
+		.map(|res| {
+			// Map the response body from Incoming to our Body type
+			let (parts, incoming) = res.into_parts();
+			let body: Body = incoming.map_err(|e| e.to_string()).boxed();
+			let mut res = Response::from_parts(parts, body);
+
 			let mut rm = |key: &str| res.headers_mut().remove(key);
 
 			rm("access-control-expose-headers");
@@ -344,12 +476,6 @@ fn reddit_short_head(path: String, quarantine: bool, base_path: &'static str, ho
 	request(&Method::HEAD, path, false, quarantine, base_path, host)
 }
 
-// /// Makes a HEAD request to Reddit at `path`. This will not follow redirects.
-// fn reddit_head(path: String, quarantine: bool) -> Boxed<Result<Response<Body>, String>> {
-// 	request(&Method::HEAD, path, false, quarantine, false)
-// }
-// Unused - reddit_head is only ever called in the context of a short URL
-
 /// Build a Reddit API request with shuffled headers.
 fn build_reddit_request(method: &Method, url: &str, quarantine: bool, host: &str) -> Result<Request<Body>, String> {
 	let mut headers: Vec<(String, String)> = vec![
@@ -372,7 +498,7 @@ fn build_reddit_request(method: &Method, url: &str, quarantine: bool, host: &str
 		}
 	}
 
-	// shuffle headers: https://github.com/redlib-org/redlib/issues/324
+	// shuffle headers
 	fastrand::shuffle(&mut headers);
 
 	let mut builder = Request::builder().method(method).uri(url);
@@ -381,7 +507,7 @@ fn build_reddit_request(method: &Method, url: &str, quarantine: bool, host: &str
 		builder = builder.header(key, value);
 	}
 
-	builder.body(Body::empty()).map_err(|_| "Post url contains non-ASCII characters".to_string())
+	builder.body(empty()).map_err(|_| "Post url contains non-ASCII characters".to_string())
 }
 
 /// Execute a single request attempt against Reddit, handling redirects and decompression.
@@ -392,7 +518,12 @@ async fn execute_request(method: &'static Method, path: &str, redirect: bool, qu
 	let req = build_reddit_request(method, &url, quarantine, host)?;
 
 	match client.request(req).await {
-		Ok(mut response) => {
+		Ok(response) => {
+			// Map the response body from Incoming to our Body type
+			let (parts, incoming) = response.into_parts();
+			let body: Body = incoming.map_err(|e| e.to_string()).boxed();
+			let mut response = Response::from_parts(parts, body);
+
 			// Reddit may respond with a 3xx. Decide whether or not to
 			// redirect based on caller params.
 			if response.status().is_redirection() {
@@ -407,17 +538,6 @@ async fn execute_request(method: &'static Method, path: &str, redirect: bool, qu
 					method,
 					location_header
 						.map(|val| {
-							// We need to make adjustments to the URI
-							// we get back from Reddit. Namely, we
-							// must:
-							//
-							//     1. Remove the authority (e.g.
-							//     https://www.reddit.com) that may be
-							//     present, so that we recurse on the
-							//     path (and query parameters) as
-							//     required.
-							//
-							//     2. Percent-encode the path.
 							let new_path = percent_encode(val.as_bytes(), CONTROLS)
 								.to_string()
 								.trim_start_matches(REDDIT_URL_BASE)
@@ -450,20 +570,16 @@ async fn execute_request(method: &'static Method, path: &str, redirect: bool, qu
 						Err(_) => return Err("Reddit response was invalid".to_string()),
 					}
 
-					// We get here if the body is gzip-compressed.
-
-					// The body must be something that implements
-					// std::io::Read, hence the conversion to
-					// bytes::buf::Buf and then transformation into a
-					// Reader.
+					// Decompress gzip body
 					let mut decompressed: Vec<u8>;
 					{
-						let mut aggregated_body = match body::aggregate(response.body_mut()).await {
-							Ok(b) => b.reader(),
-							Err(e) => return Err(e.to_string()),
-						};
+						let aggregated_body = std::mem::replace(response.body_mut(), empty())
+							.collect()
+							.await
+							.map_err(|e| e.to_string())?;
+						let mut reader = aggregated_body.aggregate().reader();
 
-						let mut decoder = match gzip::Decoder::new(&mut aggregated_body) {
+						let mut decoder = match gzip::Decoder::new(&mut reader) {
 							Ok(decoder) => decoder,
 							Err(e) => return Err(e.to_string()),
 						};
@@ -476,7 +592,7 @@ async fn execute_request(method: &'static Method, path: &str, redirect: bool, qu
 
 					response.headers_mut().remove(header::CONTENT_ENCODING);
 					response.headers_mut().insert(header::CONTENT_LENGTH, decompressed.len().into());
-					*(response.body_mut()) = Body::from(decompressed);
+					*(response.body_mut()) = full(decompressed);
 
 					Ok(response)
 				}
@@ -514,7 +630,6 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 	// Closure to quickly build errors
 	let err = |msg: &str, e: String, path: String| -> Result<Value, String> {
-		// eprintln!("{} - {}: {}", url, msg, e);
 		Err(format!("{msg}: {e} | {path}"))
 	};
 
@@ -542,7 +657,6 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 					if is_rolling_over { "yes" } else { "no" },
 				);
 
-				// If can parse remaining as a float, round to a u16 and save
 				if let Ok(val) = remaining.parse::<f32>() {
 					OAUTH_RATELIMIT_REMAINING.store(val.round() as u16, Ordering::SeqCst);
 				}
@@ -553,8 +667,9 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 			};
 
 			// asynchronously aggregate the chunks of the body
-			match hyper::body::aggregate(response).await {
-				Ok(body) => {
+			match response.into_body().collect().await {
+				Ok(collected) => {
+					let body = collected.aggregate();
 					let has_remaining = body.has_remaining();
 
 					if !has_remaining {
@@ -641,24 +756,18 @@ async fn self_check(sub: &str) -> Result<(), String> {
 }
 
 pub async fn rate_limit_check() -> Result<(), String> {
-	// First, test the Oauth client: we can perform a rate limit check if the OAuth backend is MobileSpoof; if GenericWeb, we skip the check.
+	// First, test the Oauth client
 	if matches!(OAUTH_CLIENT.load().backend, OauthBackendImpl::GenericWeb(_)) {
 		warn!("[⚠️] Cannot perform rate limit check, running as GenericWeb. Skipping check.");
 		return Ok(());
 	}
 
-	// First, check a subreddit.
 	self_check("reddit").await?;
-	// This will reduce the rate limit to 99. Assert this check.
 	if OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst) != 99 {
 		return Err(format!("Rate limit check 1 failed: expected 99, got {}", OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst)));
 	}
-	// Now, we switch out the OAuth client.
-	// This checks for the IP rate limit association.
 	force_refresh_token().await;
-	// Now, check a new sub to break cache.
 	self_check("rust").await?;
-	// Again, assert the rate limit check.
 	if OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst) != 99 {
 		return Err(format!("Rate limit check 2 failed: expected 99, got {}", OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst)));
 	}

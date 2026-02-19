@@ -6,7 +6,8 @@ use crate::subreddit::{can_access_quarantine, quarantine};
 use crate::utils::{error, filter_posts, get_filters, nsfw_landing, parse_post, template, Post, Preferences};
 
 use askama::Template;
-use hyper::{Body, Request, Response};
+use hyper::{Request, Response};
+use crate::body::Body;
 use serde_json::Value;
 use std::borrow::ToOwned;
 use std::collections::HashSet;

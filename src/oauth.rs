@@ -1,11 +1,13 @@
 use std::{collections::HashMap, sync::atomic::Ordering, time::Duration};
 
 use crate::{
+	body::full,
 	client::{CLIENT, OAUTH_CLIENT, OAUTH_IS_ROLLING_OVER, OAUTH_RATELIMIT_REMAINING},
 	oauth_resources::ANDROID_APP_VERSION_LIST,
 };
 use base64::{engine::general_purpose, Engine as _};
-use hyper::{Body, Method, Request};
+use hyper::{Method, Request};
+use http_body_util::BodyExt;
 use log::{error, info, trace, warn};
 use serde_json::json;
 use tegen::tegen::TextGenerator;
@@ -91,7 +93,7 @@ impl Oauth {
 					error!(
 						"[⛔] Failed to create OAuth client: {}. Retrying in 5 seconds...",
 						match e {
-							AuthError::Hyper(error) => error.to_string(),
+							AuthError::Hyper(error) => error,
 							AuthError::SerdeDeserialize(error) => error.to_string(),
 							AuthError::Field((value, error)) => format!("{error}\n{value}"),
 						}
@@ -145,14 +147,14 @@ impl Oauth {
 
 #[derive(Debug)]
 enum AuthError {
-	Hyper(hyper::Error),
+	Hyper(String),
 	SerdeDeserialize(serde_json::Error),
 	Field((serde_json::Value, &'static str)),
 }
 
-impl From<hyper::Error> for AuthError {
-	fn from(err: hyper::Error) -> Self {
-		AuthError::Hyper(err)
+impl From<hyper_util::client::legacy::Error> for AuthError {
+	fn from(err: hyper_util::client::legacy::Error) -> Self {
+		AuthError::Hyper(err.to_string())
 	}
 }
 
@@ -242,7 +244,7 @@ impl OauthBackend for MobileSpoofAuth {
 		let json = json!({
 				"scopes": ["*","email", "pii"]
 		});
-		let body = Body::from(json.to_string());
+		let body = full(json.to_string());
 
 		// Build request
 		let request = builder.body(body).unwrap();
@@ -273,7 +275,7 @@ impl OauthBackend for MobileSpoofAuth {
 		trace!("Serializing response...");
 
 		// Serialize response
-		let body_bytes = hyper::body::to_bytes(resp.into_body()).await?;
+		let body_bytes = resp.into_body().collect().await.map_err(|e| AuthError::Hyper(e.to_string()))?.to_bytes();
 		let json: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(AuthError::SerdeDeserialize)?;
 
 		trace!("Accessing relevant fields...");
@@ -359,7 +361,7 @@ impl OauthBackend for GenericWebAuth {
 
 		// Set up form body
 		let body_str = format!("grant_type=https%3A%2F%2Foauth.reddit.com%2Fgrants%2Finstalled_client&device_id={}", self.device_id);
-		let body = Body::from(body_str);
+		let body = full(body_str);
 
 		// Build request
 		let request = builder.body(body).unwrap();
@@ -390,7 +392,7 @@ impl OauthBackend for GenericWebAuth {
 		trace!("Serializing GenericWebAuth response...");
 
 		// Serialize response
-		let body_bytes = hyper::body::to_bytes(resp.into_body()).await?;
+		let body_bytes = resp.into_body().collect().await.map_err(|e| AuthError::Hyper(e.to_string()))?.to_bytes();
 		let json: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(AuthError::SerdeDeserialize)?;
 
 		trace!("Accessing relevant fields...");

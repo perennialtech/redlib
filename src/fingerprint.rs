@@ -1,10 +1,13 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use cookie::Cookie;
 use hmac::{Hmac, Mac};
-use hyper::{header::HeaderValue, Body, HeaderMap, Request, Response};
+use hyper::{header::HeaderValue, HeaderMap, Request, Response};
+use http_body_util::BodyExt;
 use log::warn;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+use crate::body::{Body, full, empty};
 use std::{
 	collections::HashSet,
 	sync::{LazyLock, RwLock},
@@ -12,6 +15,7 @@ use std::{
 use time::{Duration, OffsetDateTime};
 
 use crate::{client::CLIENT, config, server::RequestExt};
+use hyper::Request as HyperRequest;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -254,8 +258,8 @@ pub fn blank_response() -> Response<Body> {
 	Response::builder()
 		.status(200)
 		.header("cache-control", "no-store")
-		.body(Body::empty())
-		.unwrap_or_default()
+		.body(empty())
+		.unwrap()
 }
 
 pub fn gate_page_response(headers: &HeaderMap<HeaderValue>) -> Response<Body> {
@@ -263,8 +267,8 @@ pub fn gate_page_response(headers: &HeaderMap<HeaderValue>) -> Response<Body> {
 		.status(200)
 		.header("content-type", "text/html; charset=utf-8")
 		.header("cache-control", "no-store")
-		.body(Body::from(FP_GATE_HTML))
-		.unwrap_or_default();
+		.body(full(FP_GATE_HTML))
+		.unwrap();
 
 	// Mark that the gate was served once. If the browser can't run/load JS,
 	// subsequent requests will stay blank without repeatedly serving HTML.
@@ -298,8 +302,8 @@ pub async fn script(req: Request<Body>) -> Result<Response<Body>, String> {
 			.status(200)
 			.header("content-type", "text/javascript; charset=utf-8")
 			.header("cache-control", "no-store")
-			.body(Body::from(include_str!("../static/fingerprint.js")))
-			.unwrap_or_default(),
+			.body(full(include_str!("../static/fingerprint.js")))
+			.unwrap(),
 	)
 }
 
@@ -311,9 +315,9 @@ pub async fn verify(req: Request<Body>) -> Result<Response<Body>, String> {
 	let headers = req.headers().clone();
 	let ua = header_str(&headers, "user-agent").unwrap_or_default();
 
-	let body = hyper::body::to_bytes(req.into_body())
+	let body = req.into_body().collect()
 		.await
-		.map_err(|e| format!("Failed to read request body: {e}"))?;
+		.map_err(|e| format!("Failed to read request body: {e}"))?.to_bytes();
 	if body.len() > 16 * 1024 {
 		return Ok(json_ok(false, None));
 	}
@@ -380,10 +384,11 @@ async fn fetch_chrome_stable_major() -> Result<u32, String> {
 		.parse()
 		.map_err(|e| format!("Invalid Chrome VersionHistory URI: {e}"))?;
 
-	let resp = CLIENT.load_full().get(uri).await.map_err(|e| format!("Failed to fetch Chrome version: {e}"))?;
-	let bytes = hyper::body::to_bytes(resp.into_body())
+	let req = HyperRequest::get(uri).body(empty()).map_err(|e| format!("Failed to build Chrome version request: {e}"))?;
+	let resp = CLIENT.load_full().request(req).await.map_err(|e| format!("Failed to fetch Chrome version: {e}"))?;
+	let bytes = resp.into_body().collect()
 		.await
-		.map_err(|e| format!("Failed to read Chrome version body: {e}"))?;
+		.map_err(|e| format!("Failed to read Chrome version body: {e}"))?.to_bytes();
 
 	let json: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("Failed to parse Chrome version JSON: {e}"))?;
 	let version = json["versions"][0]["version"].as_str().ok_or_else(|| "Missing Chrome version".to_string())?;
@@ -397,10 +402,11 @@ async fn fetch_firefox_stable_major() -> Result<u32, String> {
 		.parse()
 		.map_err(|e| format!("Invalid Firefox versions URI: {e}"))?;
 
-	let resp = CLIENT.load_full().get(uri).await.map_err(|e| format!("Failed to fetch Firefox version: {e}"))?;
-	let bytes = hyper::body::to_bytes(resp.into_body())
+	let req = HyperRequest::get(uri).body(empty()).map_err(|e| format!("Failed to build Firefox version request: {e}"))?;
+	let resp = CLIENT.load_full().request(req).await.map_err(|e| format!("Failed to fetch Firefox version: {e}"))?;
+	let bytes = resp.into_body().collect()
 		.await
-		.map_err(|e| format!("Failed to read Firefox version body: {e}"))?;
+		.map_err(|e| format!("Failed to read Firefox version body: {e}"))?.to_bytes();
 
 	let json: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("Failed to parse Firefox version JSON: {e}"))?;
 	let version = json["LATEST_FIREFOX_VERSION"]
@@ -485,8 +491,8 @@ fn json_ok(ok: bool, fp_id: Option<[u8; 16]>) -> Response<Body> {
 		.status(200)
 		.header("content-type", "application/json; charset=utf-8")
 		.header("cache-control", "no-store")
-		.body(Body::from(body))
-		.unwrap_or_default()
+		.body(full(body))
+		.unwrap()
 }
 
 fn evaluate(report: &FingerprintReport, headers: &HeaderMap<HeaderValue>, ua_bytes: &[u8]) -> (bool, [u8; 16]) {

@@ -10,7 +10,8 @@ use crate::{client::json, server::RequestExt, server::ResponseExt};
 use askama::Template;
 use cookie::Cookie;
 use htmlescape::decode_html;
-use hyper::{Body, Request, Response};
+use hyper::{Request, Response};
+use crate::body::{Body, full};
 
 use chrono::DateTime;
 use regex::Regex;
@@ -207,8 +208,8 @@ pub fn quarantine(req: &Request<Body>, sub: String, restriction: &str) -> Respon
 	Response::builder()
 		.status(403)
 		.header("content-type", "text/html")
-		.body(wall.render().unwrap_or_default().into())
-		.unwrap_or_default()
+		.body(full(wall.render().unwrap_or_default()))
+		.unwrap()
 }
 
 pub async fn add_quarantine_exception(req: Request<Body>) -> Result<Response<Body>, String> {
@@ -639,7 +640,7 @@ pub async fn rss(req: Request<Body>) -> Result<Response<Body>, String> {
 	let body = channel.to_string().into_bytes();
 
 	// Create the HTTP response
-	let mut res = Response::new(Body::from(body));
+	let mut res = Response::new(full(body));
 	res.headers_mut().insert(CONTENT_TYPE, hyper::header::HeaderValue::from_static("application/rss+xml"));
 
 	Ok(res)
