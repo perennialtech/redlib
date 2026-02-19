@@ -15,7 +15,7 @@ default-run = "redlib"
 
 [features]
 default = ["tor"]
-tor = ["arti-client", "tor-rtcompat", "openssl-sys", "tls-api", "tls-api-native-tls", "tokio-native-tls"]
+tor = ["arti-client", "tor-rtcompat", "openssl-sys", "tls-api", "tls-api-native-tls", "tokio-openssl"]
 tor-full = ["tor"]
 
 [dependencies]
@@ -62,7 +62,7 @@ arc-swap = "1.7.1"
 serde_json_path = "0.7.1"
 async-recursion = "1.1.1"
 pulldown-cmark = { version = "0.12.0", features = ["simd", "html"], default-features = false }
-hyper-tls = { version = "0.6.0" }
+hyper-openssl = { version = "0.10.2", features = ["client-legacy"] }
 openssl = { version = "0.10", features = ["vendored"] }
 tegen = "0.1.4"
 serde_urlencoded = "0.7.1"
@@ -81,7 +81,7 @@ tor-rtcompat = { version = "0.39.0", features = ["native-tls"], optional = true 
 openssl-sys = { version = "0.9", features = ["vendored"], optional = true }
 tls-api = { version = "0.12.0", optional = true }
 tls-api-native-tls = { version = "0.12.1", optional = true }
-tokio-native-tls = { version = "0.3", optional = true }
+tokio-openssl = { version = "0.6.5", optional = true }
 
 
 [dev-dependencies]

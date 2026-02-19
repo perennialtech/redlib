@@ -21,6 +21,8 @@ use std::sync::atomic::{AtomicBool, AtomicU16};
 use std::sync::{Arc, LazyLock};
 use std::{io, result::Result};
 
+use openssl::ssl::{SslConnector, SslMethod};
+
 use crate::body::{Body, full, empty};
 use crate::dbg_msg;
 #[cfg(any(feature = "tor", test))]
@@ -32,7 +34,7 @@ use crate::utils::{format_url, Post};
 #[cfg(not(feature = "tor"))]
 use hyper_util::client::legacy::connect::HttpConnector;
 #[cfg(not(feature = "tor"))]
-use hyper_tls::HttpsConnector;
+use hyper_openssl::client::legacy::HttpsConnector;
 
 #[cfg(feature = "tor")]
 use arti_client::TorClient;
@@ -71,11 +73,42 @@ const ALTERNATIVE_REDDIT_URL_BASE: &str = "https://www.reddittorjg6rue252oqsxryo
 #[cfg(feature = "tor")]
 const ALTERNATIVE_REDDIT_URL_BASE_HOST: &str = "www.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion";
 
+// --- Android-like TLS cipher suite configuration ---
+
+fn android_ssl_connector() -> openssl::ssl::SslConnectorBuilder {
+	let mut builder = SslConnector::builder(SslMethod::tls_client())
+		.expect("Failed to create SslConnectorBuilder");
+
+	// TLS 1.3 ciphers (Android default order)
+	builder
+		.set_ciphersuites("TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256")
+		.expect("Failed to set TLS 1.3 ciphersuites");
+
+	// TLS 1.2 ciphers (Android default order, includes CBC/RSA ciphers)
+	builder
+		.set_cipher_list(
+			"ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:\
+			 ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:\
+			 ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:\
+			 ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES256-SHA:\
+			 AES128-GCM-SHA256:AES256-GCM-SHA384:\
+			 AES128-SHA:AES256-SHA",
+		)
+		.expect("Failed to set TLS 1.2 cipher list");
+
+	builder
+}
+
 // --- Non-Tor client ---
 
 #[cfg(not(feature = "tor"))]
 pub static HTTPS_CONNECTOR: LazyLock<HttpsConnector<HttpConnector>> =
-	LazyLock::new(|| HttpsConnector::new());
+	LazyLock::new(|| {
+		HttpsConnector::with_connector(
+			HttpConnector::new(),
+			android_ssl_connector(),
+		).expect("Failed to create HTTPS connector")
+	});
 
 #[cfg(not(feature = "tor"))]
 pub static CLIENT: LazyLock<ArcSwap<Client<HttpsConnector<HttpConnector>, Body>>> = LazyLock::new(|| {
@@ -131,7 +164,7 @@ mod tor_connector {
 		#[project = TorStreamProj]
 		pub enum TorStream {
 			Plain { #[pin] inner: TokioIo<DataStream> },
-			Tls { #[pin] inner: TokioIo<tokio_native_tls::TlsStream<DataStream>> },
+			Tls { #[pin] inner: TokioIo<tokio_openssl::SslStream<DataStream>> },
 		}
 	}
 
@@ -176,19 +209,16 @@ mod tor_connector {
 	#[derive(Clone)]
 	pub struct ArtiConnector {
 		tor_client: TorClient<PreferredRuntime>,
-		tls_connector: tokio_native_tls::TlsConnector,
+		tls_connector: openssl::ssl::SslConnector,
 	}
 
 	impl ArtiConnector {
 		pub fn new(tor_client: TorClient<PreferredRuntime>) -> Self {
-			let native_connector = tokio_native_tls::native_tls::TlsConnector::builder()
-				.danger_accept_invalid_certs(true)
-				.danger_accept_invalid_hostnames(true)
-				.build()
-				.expect("Failed to build native TLS connector");
+			let mut builder = android_ssl_connector();
+			builder.set_verify(openssl::ssl::SslVerifyMode::NONE);
 			Self {
 				tor_client,
-				tls_connector: tokio_native_tls::TlsConnector::from(native_connector),
+				tls_connector: builder.build(),
 			}
 		}
 	}
@@ -222,11 +252,18 @@ mod tor_connector {
 
 				if is_https {
 					// Wrap with TLS for HTTPS (including .onion HTTPS endpoints)
-					let tls_stream = tls_connector
-						.connect(host, data_stream)
+					let ssl = tls_connector
+						.configure()
+						.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
+						.into_ssl(host)
+						.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+					let mut stream = tokio_openssl::SslStream::new(ssl, data_stream)
+						.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+					Pin::new(&mut stream)
+						.connect()
 						.await
 						.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
-					Ok(TorStream::Tls { inner: TokioIo::new(tls_stream) })
+					Ok(TorStream::Tls { inner: TokioIo::new(stream) })
 				} else {
 					// Plain for HTTP
 					Ok(TorStream::Plain { inner: TokioIo::new(data_stream) })
