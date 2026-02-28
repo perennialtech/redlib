@@ -2,6 +2,8 @@ FROM rust:trixie AS builder
 
 WORKDIR /redlib
 
+
+RUN apt update && apt install -y cmake clang clang-tools
 # download (most) dependencies in their own layer
 COPY Cargo.lock Cargo.toml ./
 RUN mkdir src && echo "fn main() { panic!(\"why am i running?\") }" > src/main.rs

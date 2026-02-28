@@ -3,16 +3,17 @@ use bytes::Buf;
 use cached::proc_macro::cached;
 use futures_lite::future::block_on;
 use futures_lite::{future::Boxed, FutureExt};
+use http_body_util::BodyExt;
 use hyper::header::HeaderValue;
 use hyper::{header, Method, Request, Response, Uri};
+use hyper_boring::HttpsConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
-use http_body_util::BodyExt;
 use libflate::gzip;
-#[cfg(not(feature = "tor"))]
-use log::{error, trace, warn};
 #[cfg(feature = "tor")]
 use log::{error, info, trace, warn};
+#[cfg(not(feature = "tor"))]
+use log::{error, trace, warn};
 use percent_encoding::{percent_encode, CONTROLS};
 use serde_json::Value;
 
@@ -21,25 +22,23 @@ use std::sync::atomic::{AtomicBool, AtomicU16};
 use std::sync::{Arc, LazyLock};
 use std::{io, result::Result};
 
-use openssl::ssl::{SslConnector, SslMethod};
+use boring::ssl::{SslConnector, SslMethod, SslVerifyMode};
 
-use crate::body::{Body, full, empty};
-use crate::dbg_msg;
+use crate::body::{empty, full, Body};
 #[cfg(any(feature = "tor", test))]
 use crate::config::get_setting;
+use crate::dbg_msg;
 use crate::oauth::{force_refresh_token, token_daemon, Oauth, OauthBackendImpl};
 use crate::server::RequestExt;
 use crate::utils::{format_url, Post};
 
 #[cfg(not(feature = "tor"))]
 use hyper_util::client::legacy::connect::HttpConnector;
-#[cfg(not(feature = "tor"))]
-use hyper_openssl::client::legacy::HttpsConnector;
 
 #[cfg(feature = "tor")]
-use arti_client::TorClient;
-#[cfg(feature = "tor")]
 use arti_client::config::TorClientConfigBuilder;
+#[cfg(feature = "tor")]
+use arti_client::TorClient;
 #[cfg(feature = "tor")]
 use tor_rtcompat::PreferredRuntime;
 
@@ -75,16 +74,13 @@ const ALTERNATIVE_REDDIT_URL_BASE_HOST: &str = "www.reddittorjg6rue252oqsxryoxen
 
 // --- Android-like TLS cipher suite configuration ---
 
-fn android_ssl_connector() -> openssl::ssl::SslConnectorBuilder {
-	let mut builder = SslConnector::builder(SslMethod::tls_client())
-		.expect("Failed to create SslConnectorBuilder");
+fn android_ssl_connector() -> boring::ssl::SslConnectorBuilder {
+	let mut builder = SslConnector::builder(SslMethod::tls()).expect("Failed to create SslConnectorBuilder");
+	builder.set_verify(SslVerifyMode::PEER);
+	builder.set_alpn_protos(b"\x02h2\x08http/1.1").expect("Failed to configure ALPN");
 
-	// TLS 1.3 ciphers (Android default order)
-	builder
-		.set_ciphersuites("TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256")
-		.expect("Failed to set TLS 1.3 ciphersuites");
-
-	// TLS 1.2 ciphers (Android default order, includes CBC/RSA ciphers)
+	// BoringSSL does not expose per-TLS1.3 cipher-suite configuration.
+	// Keep an explicit pre-TLS1.3 cipher order.
 	builder
 		.set_cipher_list(
 			"ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:\
@@ -102,20 +98,15 @@ fn android_ssl_connector() -> openssl::ssl::SslConnectorBuilder {
 // --- Non-Tor client ---
 
 #[cfg(not(feature = "tor"))]
-pub static HTTPS_CONNECTOR: LazyLock<HttpsConnector<HttpConnector>> =
-	LazyLock::new(|| {
-		HttpsConnector::with_connector(
-			HttpConnector::new(),
-			android_ssl_connector(),
-		).expect("Failed to create HTTPS connector")
-	});
+pub static HTTPS_CONNECTOR: LazyLock<HttpsConnector<HttpConnector>> = LazyLock::new(|| {
+	let mut http = HttpConnector::new();
+	http.enforce_http(false);
+	HttpsConnector::with_connector(http, android_ssl_connector()).expect("Failed to create HTTPS connector")
+});
 
 #[cfg(not(feature = "tor"))]
-pub static CLIENT: LazyLock<ArcSwap<Client<HttpsConnector<HttpConnector>, Body>>> = LazyLock::new(|| {
-	ArcSwap::new(Arc::new(
-		Client::builder(TokioExecutor::new()).build::<_, Body>(HTTPS_CONNECTOR.clone()),
-	))
-});
+pub static CLIENT: LazyLock<ArcSwap<Client<HttpsConnector<HttpConnector>, Body>>> =
+	LazyLock::new(|| ArcSwap::new(Arc::new(Client::builder(TokioExecutor::new()).build::<_, Body>(HTTPS_CONNECTOR.clone()))));
 
 // --- Tor client ---
 
@@ -133,10 +124,7 @@ fn build_tor_config() -> arti_client::TorClientConfig {
 
 	info!("Using Arti directories - State: {}, Cache: {}", state_dir, cache_dir);
 
-	let mut config_builder = TorClientConfigBuilder::from_directories(
-		std::path::PathBuf::from(state_dir),
-		std::path::PathBuf::from(cache_dir)
-	);
+	let mut config_builder = TorClientConfigBuilder::from_directories(std::path::PathBuf::from(state_dir), std::path::PathBuf::from(cache_dir));
 
 	config_builder.address_filter().allow_onion_addrs(true);
 	config_builder.stream_timeouts().connect_timeout(std::time::Duration::from_secs(60));
@@ -144,87 +132,79 @@ fn build_tor_config() -> arti_client::TorClientConfig {
 	config_builder.build().expect("Failed to build Tor client config")
 }
 
-// Custom Tor connector implementing tower::Service<Uri>
+// Custom Tor transport connector implementing tower::Service<Uri>.
+// TLS is layered by hyper-boring so this connector only dials DataStream.
 #[cfg(feature = "tor")]
 mod tor_connector {
 	use super::*;
 	use arti_client::DataStream;
-	use hyper::rt::{Read, Write, ReadBufCursor};
-	use hyper_util::client::legacy::connect::Connection;
+	use hyper_util::client::legacy::connect::{Connected, Connection};
 	use hyper_util::rt::TokioIo;
 	use pin_project_lite::pin_project;
+	use std::fmt;
 	use std::future::Future;
 	use std::pin::Pin;
 	use std::task::{Context, Poll};
+	use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 	pin_project! {
-		/// A stream that is either a raw Tor DataStream or a TLS-wrapped one.
-		/// Inner types are wrapped in TokioIo to bridge tokio AsyncRead/AsyncWrite
-		/// to hyper's rt::Read/rt::Write traits.
-		#[project = TorStreamProj]
-		pub enum TorStream {
-			Plain { #[pin] inner: TokioIo<DataStream> },
-			Tls { #[pin] inner: TokioIo<tokio_openssl::SslStream<DataStream>> },
+		pub struct ArtiStream {
+			#[pin]
+			inner: DataStream,
 		}
 	}
 
-	impl Read for TorStream {
-		fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: ReadBufCursor<'_>) -> Poll<io::Result<()>> {
-			match self.project() {
-				TorStreamProj::Plain { inner } => inner.poll_read(cx, buf),
-				TorStreamProj::Tls { inner } => inner.poll_read(cx, buf),
-			}
+	impl ArtiStream {
+		pub fn new(inner: DataStream) -> Self {
+			Self { inner }
 		}
 	}
 
-	impl Write for TorStream {
+	impl fmt::Debug for ArtiStream {
+		fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+			f.write_str("ArtiStream(..)")
+		}
+	}
+
+	impl AsyncRead for ArtiStream {
+		fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+			self.project().inner.poll_read(cx, buf)
+		}
+	}
+
+	impl AsyncWrite for ArtiStream {
 		fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-			match self.project() {
-				TorStreamProj::Plain { inner } => inner.poll_write(cx, buf),
-				TorStreamProj::Tls { inner } => inner.poll_write(cx, buf),
-			}
+			self.project().inner.poll_write(cx, buf)
 		}
 
 		fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-			match self.project() {
-				TorStreamProj::Plain { inner } => inner.poll_flush(cx),
-				TorStreamProj::Tls { inner } => inner.poll_flush(cx),
-			}
+			self.project().inner.poll_flush(cx)
 		}
 
 		fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-			match self.project() {
-				TorStreamProj::Plain { inner } => inner.poll_shutdown(cx),
-				TorStreamProj::Tls { inner } => inner.poll_shutdown(cx),
-			}
+			self.project().inner.poll_shutdown(cx)
 		}
 	}
 
-	impl Connection for TorStream {
-		fn connected(&self) -> hyper_util::client::legacy::connect::Connected {
-			hyper_util::client::legacy::connect::Connected::new()
+	impl Connection for ArtiStream {
+		fn connected(&self) -> Connected {
+			Connected::new()
 		}
 	}
 
 	#[derive(Clone)]
 	pub struct ArtiConnector {
 		tor_client: TorClient<PreferredRuntime>,
-		tls_connector: openssl::ssl::SslConnector,
 	}
 
 	impl ArtiConnector {
 		pub fn new(tor_client: TorClient<PreferredRuntime>) -> Self {
-			let mut builder = android_ssl_connector();
-			builder.set_verify(openssl::ssl::SslVerifyMode::NONE);
-			Self {
-				tor_client,
-				tls_connector: builder.build(),
-			}
+			Self { tor_client }
 		}
 	}
 
 	impl tower::Service<Uri> for ArtiConnector {
-		type Response = TorStream;
+		type Response = TokioIo<ArtiStream>;
 		type Error = Box<dyn std::error::Error + Send + Sync>;
 		type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -234,7 +214,6 @@ mod tor_connector {
 
 		fn call(&mut self, uri: Uri) -> Self::Future {
 			let tor_client = self.tor_client.clone();
-			let tls_connector = self.tls_connector.clone();
 
 			Box::pin(async move {
 				let host = uri.host().ok_or("URI has no host")?;
@@ -248,26 +227,7 @@ mod tor_connector {
 					.await
 					.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
 
-				let is_https = uri.scheme_str() == Some("https");
-
-				if is_https {
-					// Wrap with TLS for HTTPS (including .onion HTTPS endpoints)
-					let ssl = tls_connector
-						.configure()
-						.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
-						.into_ssl(host)
-						.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
-					let mut stream = tokio_openssl::SslStream::new(ssl, data_stream)
-						.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
-					Pin::new(&mut stream)
-						.connect()
-						.await
-						.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
-					Ok(TorStream::Tls { inner: TokioIo::new(stream) })
-				} else {
-					// Plain for HTTP
-					Ok(TorStream::Plain { inner: TokioIo::new(data_stream) })
-				}
+				Ok(TokioIo::new(ArtiStream::new(data_stream)))
 			})
 		}
 	}
@@ -277,9 +237,10 @@ mod tor_connector {
 use tor_connector::ArtiConnector;
 
 #[cfg(feature = "tor")]
-fn build_http_client(tor_client: TorClient<PreferredRuntime>) -> Client<ArtiConnector, Body> {
+fn build_http_client(tor_client: TorClient<PreferredRuntime>) -> Client<HttpsConnector<ArtiConnector>, Body> {
 	let connector = ArtiConnector::new(tor_client);
-	Client::builder(TokioExecutor::new()).build::<_, Body>(connector)
+	let https = HttpsConnector::with_connector(connector, android_ssl_connector()).expect("Failed to create Tor HTTPS connector");
+	Client::builder(TokioExecutor::new()).build::<_, Body>(https)
 }
 
 #[cfg(feature = "tor")]
@@ -308,7 +269,7 @@ pub static TOR_CLIENT: LazyLock<ArcSwap<TorClient<PreferredRuntime>>> = LazyLock
 });
 
 #[cfg(feature = "tor")]
-pub static CLIENT: LazyLock<ArcSwap<Client<ArtiConnector, Body>>> = LazyLock::new(|| {
+pub static CLIENT: LazyLock<ArcSwap<Client<HttpsConnector<ArtiConnector>, Body>>> = LazyLock::new(|| {
 	let tor_client = (**TOR_CLIENT.load()).clone();
 	ArcSwap::new(Arc::new(build_http_client(tor_client)))
 });
