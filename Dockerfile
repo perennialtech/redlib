@@ -1,9 +1,10 @@
-FROM rust:trixie AS builder
+FROM cgr.dev/chainguard/rust:latest-dev AS builder
 
 WORKDIR /redlib
 
-
-RUN apt update && apt install -y cmake clang clang-tools
+# boring-sys needs cmake + clang for BoringSSL build + bindgen.
+USER 0
+RUN apk add --no-cache cmake clang
 # download (most) dependencies in their own layer
 COPY Cargo.lock Cargo.toml ./
 RUN mkdir src && echo "fn main() { panic!(\"why am i running?\") }" > src/main.rs
@@ -20,11 +21,10 @@ RUN echo "finished building redlib!"
 ########################
 ## release image
 ########################
-FROM gcr.io/distroless/cc-debian13:nonroot AS release
+FROM cgr.dev/chainguard/glibc-dynamic:latest AS release
 
 # Import redlib binary from builder
-COPY --from=builder /redlib/target/release/redlib ./redlib
-COPY --from=builder /usr/lib/x86_64-linux-gnu/liblzma.so.5 /usr/lib/liblzma.so.5
+COPY --from=builder /redlib/target/release/redlib /redlib
 
 # Document that we intend to expose port 8080
 EXPOSE 8080
@@ -33,4 +33,4 @@ EXPOSE 8080
 ENV REDLIB_ARTI_PATH="/tmp/arti"
 VOLUME ["/tmp/arti"]
 
-CMD ["./redlib"]
+CMD ["/redlib"]
