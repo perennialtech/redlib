@@ -5,6 +5,8 @@ use crate::{
 	client::{CLIENT, OAUTH_CLIENT, OAUTH_IS_ROLLING_OVER, OAUTH_RATELIMIT_REMAINING},
 	oauth_resources::ANDROID_APP_VERSION_LIST,
 };
+#[cfg(feature = "tor")]
+use crate::client::{mark_tor_connection_healthy, recover_tor_connection};
 use base64::{engine::general_purpose, Engine as _};
 use hyper::{Method, Request};
 use http_body_util::BodyExt;
@@ -20,7 +22,8 @@ const AUTH_ENDPOINT: &str = "https://www.reddit.com";
 #[cfg(feature = "tor")]
 const AUTH_ENDPOINT: &str = "https://www.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion";
 
-const OAUTH_TIMEOUT: Duration = Duration::from_secs(5);
+const OAUTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const OAUTH_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 // Response from OAuth backend authentication
 #[derive(Debug, Clone)]
@@ -86,21 +89,32 @@ impl Oauth {
 			let attempt = Self::new_with_timeout_with_backend(backend.clone()).await;
 			match attempt {
 				Ok(Ok(oauth)) => {
+					#[cfg(feature = "tor")]
+					mark_tor_connection_healthy();
 					info!("[✅] Successfully created OAuth client");
 					return oauth;
 				}
 				Ok(Err(e)) => {
+					let err_msg = match e {
+						AuthError::Hyper(error) => error,
+						AuthError::SerdeDeserialize(error) => error.to_string(),
+						AuthError::Field((value, error)) => format!("{error}\n{value}"),
+					};
 					error!(
 						"[⛔] Failed to create OAuth client: {}. Retrying in 5 seconds...",
-						match e {
-							AuthError::Hyper(error) => error,
-							AuthError::SerdeDeserialize(error) => error.to_string(),
-							AuthError::Field((value, error)) => format!("{error}\n{value}"),
-						}
+						err_msg
 					);
+					#[cfg(feature = "tor")]
+					{
+						recover_tor_connection("OAuth client creation", Some(err_msg.as_str())).await;
+					}
 				}
 				Err(_) => {
 					error!("[⛔] Failed to create OAuth client before timeout. Retrying in 5 seconds...");
+					#[cfg(feature = "tor")]
+					{
+						recover_tor_connection("OAuth client creation", None).await;
+					}
 				}
 			}
 
@@ -112,18 +126,19 @@ impl Oauth {
 				backend = OauthBackendImpl::GenericWeb(GenericWebAuth::new());
 			}
 
-			// Crash after 10 total failures
+			// Never kill the process here: keep retrying and let Tor recovery logic rotate state if needed.
 			if failure_count >= 10 {
-				error!("[⛔] Failed to create OAuth client (mobile + generic)");
-				std::process::exit(1);
+				error!("[⛔] Failed to create OAuth client (mobile + generic). Continuing recovery retries...");
+				failure_count = 0;
+				backend = OauthBackendImpl::MobileSpoof(MobileSpoofAuth::new());
 			}
 
-			tokio::time::sleep(OAUTH_TIMEOUT).await;
+			tokio::time::sleep(OAUTH_RETRY_DELAY).await;
 		}
 	}
 
 	async fn new_with_timeout_with_backend(mut backend: OauthBackendImpl) -> Result<Result<Self, AuthError>, Elapsed> {
-		timeout(OAUTH_TIMEOUT, async move {
+		timeout(OAUTH_REQUEST_TIMEOUT, async move {
 			let response = backend.authenticate().await?;
 
 			// Build headers_map from backend headers + Authorization header
@@ -152,9 +167,20 @@ enum AuthError {
 	Field((serde_json::Value, &'static str)),
 }
 
+fn format_client_connect_error(err: &hyper_util::client::legacy::Error) -> String {
+	let mut msg = err.to_string();
+	let mut source = std::error::Error::source(err);
+	while let Some(next) = source {
+		msg.push_str(": ");
+		msg.push_str(&next.to_string());
+		source = next.source();
+	}
+	msg
+}
+
 impl From<hyper_util::client::legacy::Error> for AuthError {
 	fn from(err: hyper_util::client::legacy::Error) -> Self {
-		AuthError::Hyper(err.to_string())
+		AuthError::Hyper(format_client_connect_error(&err))
 	}
 }
 

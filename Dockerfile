@@ -4,7 +4,7 @@ WORKDIR /redlib
 
 # boring-sys needs cmake + clang for BoringSSL build + bindgen.
 USER 0
-RUN apk add --no-cache cmake clang
+RUN apk add --no-cache cmake clang perl
 # download (most) dependencies in their own layer
 COPY Cargo.lock Cargo.toml ./
 RUN mkdir src && echo "fn main() { panic!(\"why am i running?\") }" > src/main.rs

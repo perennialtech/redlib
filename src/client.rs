@@ -4,12 +4,15 @@ use cached::proc_macro::cached;
 use futures_lite::future::block_on;
 use futures_lite::{future::Boxed, FutureExt};
 use http_body_util::BodyExt;
+use hyper::body::Incoming;
 use hyper::header::HeaderValue;
 use hyper::{header, Method, Request, Response, Uri};
-use hyper_boring::HttpsConnector;
+use hyper_tls::HttpsConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use libflate::gzip;
+#[cfg(feature = "tor")]
+use hyper_tls::native_tls::TlsConnector;
 #[cfg(feature = "tor")]
 use log::{error, info, trace, warn};
 #[cfg(not(feature = "tor"))]
@@ -17,12 +20,14 @@ use log::{error, trace, warn};
 use percent_encoding::{percent_encode, CONTROLS};
 use serde_json::Value;
 
+#[cfg(feature = "tor")]
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU16};
 use std::sync::{Arc, LazyLock};
+#[cfg(feature = "tor")]
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{io, result::Result};
-
-use boring::ssl::{SslConnector, SslMethod, SslVerifyMode};
 
 use crate::body::{empty, full, Body};
 #[cfg(any(feature = "tor", test))]
@@ -72,37 +77,28 @@ const ALTERNATIVE_REDDIT_URL_BASE: &str = "https://www.reddittorjg6rue252oqsxryo
 #[cfg(feature = "tor")]
 const ALTERNATIVE_REDDIT_URL_BASE_HOST: &str = "www.reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad.onion";
 
-// --- Android-like TLS cipher suite configuration ---
+#[cfg(feature = "tor")]
+const DEFAULT_ARTI_PATH: &str = "/tmp/arti";
+#[cfg(feature = "tor")]
+const DEFAULT_TOR_HARD_RESET_FAILURE_STREAK: u16 = 3;
+#[cfg(feature = "tor")]
+const ARTI_ROTATED_STATE_BACKUP_LIMIT: usize = 2;
 
-fn android_ssl_connector() -> boring::ssl::SslConnectorBuilder {
-	let mut builder = SslConnector::builder(SslMethod::tls()).expect("Failed to create SslConnectorBuilder");
-	builder.set_verify(SslVerifyMode::PEER);
-	builder.set_alpn_protos(b"\x02h2\x08http/1.1").expect("Failed to configure ALPN");
-
-	// BoringSSL does not expose per-TLS1.3 cipher-suite configuration.
-	// Keep an explicit pre-TLS1.3 cipher order.
-	builder
-		.set_cipher_list(
-			"ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:\
-			 ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:\
-			 ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:\
-			 ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES256-SHA:\
-			 AES128-GCM-SHA256:AES256-GCM-SHA384:\
-			 AES128-SHA:AES256-SHA",
-		)
-		.expect("Failed to set TLS 1.2 cipher list");
-
-	builder
+fn format_client_connect_error(err: &hyper_util::client::legacy::Error) -> String {
+	let mut msg = err.to_string();
+	let mut source = std::error::Error::source(err);
+	while let Some(next) = source {
+		msg.push_str(": ");
+		msg.push_str(&next.to_string());
+		source = next.source();
+	}
+	msg
 }
 
 // --- Non-Tor client ---
 
 #[cfg(not(feature = "tor"))]
-pub static HTTPS_CONNECTOR: LazyLock<HttpsConnector<HttpConnector>> = LazyLock::new(|| {
-	let mut http = HttpConnector::new();
-	http.enforce_http(false);
-	HttpsConnector::with_connector(http, android_ssl_connector()).expect("Failed to create HTTPS connector")
-});
+pub static HTTPS_CONNECTOR: LazyLock<HttpsConnector<HttpConnector>> = LazyLock::new(HttpsConnector::new);
 
 #[cfg(not(feature = "tor"))]
 pub static CLIENT: LazyLock<ArcSwap<Client<HttpsConnector<HttpConnector>, Body>>> =
@@ -111,29 +107,210 @@ pub static CLIENT: LazyLock<ArcSwap<Client<HttpsConnector<HttpConnector>, Body>>
 // --- Tor client ---
 
 #[cfg(feature = "tor")]
-fn build_tor_config() -> arti_client::TorClientConfig {
-	let arti_path = get_setting("REDLIB_ARTI_PATH").unwrap_or_else(|| "/tmp/arti".to_string());
+#[derive(Clone, Debug)]
+struct ArtiPaths {
+	root: PathBuf,
+	state: PathBuf,
+	cache: PathBuf,
+}
 
-	let state_dir = format!("{}/state", arti_path);
-	let cache_dir = format!("{}/cache", arti_path);
-	std::fs::create_dir_all(&state_dir).ok();
-	std::fs::create_dir_all(&cache_dir).ok();
+#[cfg(feature = "tor")]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum TorRebuildMode {
+	Soft,
+	HardReset,
+}
+
+#[cfg(feature = "tor")]
+fn arti_paths() -> ArtiPaths {
+	let root = PathBuf::from(get_setting("REDLIB_ARTI_PATH").unwrap_or_else(|| DEFAULT_ARTI_PATH.to_string()));
+	ArtiPaths {
+		state: root.join("state"),
+		cache: root.join("cache"),
+		root,
+	}
+}
+
+#[cfg(feature = "tor")]
+fn prepare_arti_directories(paths: &ArtiPaths) {
+	std::fs::create_dir_all(&paths.root).ok();
+	std::fs::create_dir_all(&paths.state).ok();
+	std::fs::create_dir_all(&paths.cache).ok();
 
 	use std::os::unix::fs::PermissionsExt;
-	std::fs::set_permissions(&arti_path, std::fs::Permissions::from_mode(0o700)).ok();
+	for path in [&paths.root, &paths.state, &paths.cache] {
+		std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).ok();
+	}
+}
 
-	info!("Using Arti directories - State: {}, Cache: {}", state_dir, cache_dir);
+#[cfg(feature = "tor")]
+fn rotate_arti_subdir(dir: &Path) -> Result<Option<PathBuf>, io::Error> {
+	if !dir.exists() {
+		return Ok(None);
+	}
 
-	let mut config_builder = TorClientConfigBuilder::from_directories(std::path::PathBuf::from(state_dir), std::path::PathBuf::from(cache_dir));
+	let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+	let name = dir.file_name().and_then(|name| name.to_str()).unwrap_or("arti");
+	let rotated = dir.with_file_name(format!("{name}.recovered-{timestamp}"));
+	std::fs::rename(dir, &rotated)?;
+	Ok(Some(rotated))
+}
+
+#[cfg(feature = "tor")]
+fn cleanup_rotated_arti_state(paths: &ArtiPaths) {
+	let Ok(entries) = std::fs::read_dir(&paths.root) else {
+		return;
+	};
+
+	let mut rotated = entries
+		.filter_map(Result::ok)
+		.map(|entry| entry.path())
+		.filter(|path| {
+			path.file_name()
+				.and_then(|name| name.to_str())
+				.map(|name| name.starts_with("state.recovered-") || name.starts_with("cache.recovered-"))
+				.unwrap_or(false)
+		})
+		.collect::<Vec<_>>();
+
+	rotated.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+
+	for stale in rotated.into_iter().skip(ARTI_ROTATED_STATE_BACKUP_LIMIT) {
+		let result = if stale.is_dir() {
+			std::fs::remove_dir_all(&stale)
+		} else {
+			std::fs::remove_file(&stale)
+		};
+
+		if let Err(err) = result {
+			warn!("Failed to clean up rotated Arti path {}: {}", stale.display(), err);
+		}
+	}
+}
+
+#[cfg(feature = "tor")]
+fn hard_reset_arti_runtime() -> Result<(), String> {
+	let paths = arti_paths();
+	std::fs::create_dir_all(&paths.root).map_err(|err| format!("Failed to prepare Arti root {}: {err}", paths.root.display()))?;
+
+	if let Some(rotated) = rotate_arti_subdir(&paths.state).map_err(|err| format!("Failed to rotate Arti state {}: {err}", paths.state.display()))? {
+		warn!("Rotated Arti state directory to {}", rotated.display());
+	}
+	if let Some(rotated) = rotate_arti_subdir(&paths.cache).map_err(|err| format!("Failed to rotate Arti cache {}: {err}", paths.cache.display()))? {
+		warn!("Rotated Arti cache directory to {}", rotated.display());
+	}
+
+	prepare_arti_directories(&paths);
+	cleanup_rotated_arti_state(&paths);
+	Ok(())
+}
+
+#[cfg(feature = "tor")]
+fn build_tor_config() -> arti_client::TorClientConfig {
+	let paths = arti_paths();
+	prepare_arti_directories(&paths);
+
+	info!(
+		"Using Arti directories - State: {}, Cache: {}",
+		paths.state.display(),
+		paths.cache.display()
+	);
+
+	let mut config_builder = TorClientConfigBuilder::from_directories(paths.state.clone(), paths.cache.clone());
+
+	let tor_connect_timeout_secs = get_setting("REDLIB_TOR_CONNECT_TIMEOUT_SECS")
+		.and_then(|v| v.parse::<u64>().ok())
+		.unwrap_or(180);
+	let tor_circuit_request_timeout_secs = get_setting("REDLIB_TOR_CIRCUIT_REQUEST_TIMEOUT_SECS")
+		.and_then(|v| v.parse::<u64>().ok())
+		.unwrap_or(180);
+	let tor_circuit_request_max_retries = get_setting("REDLIB_TOR_CIRCUIT_REQUEST_MAX_RETRIES")
+		.and_then(|v| v.parse::<u32>().ok())
+		.unwrap_or(32);
 
 	config_builder.address_filter().allow_onion_addrs(true);
-	config_builder.stream_timeouts().connect_timeout(std::time::Duration::from_secs(60));
+	config_builder
+		.stream_timeouts()
+		.connect_timeout(std::time::Duration::from_secs(tor_connect_timeout_secs));
+	config_builder
+		.circuit_timing()
+		.request_timeout(std::time::Duration::from_secs(tor_circuit_request_timeout_secs))
+		.request_max_retries(tor_circuit_request_max_retries);
+
+	info!(
+		"Using Tor timeouts: connect={}s, circuit_request={}s, circuit_retries={}",
+		tor_connect_timeout_secs, tor_circuit_request_timeout_secs, tor_circuit_request_max_retries
+	);
 
 	config_builder.build().expect("Failed to build Tor client config")
 }
 
+#[cfg(feature = "tor")]
+fn tor_hard_reset_failure_streak() -> u16 {
+	std::env::var("REDLIB_TOR_HARD_RESET_FAILURE_STREAK")
+		.ok()
+		.and_then(|value| value.parse::<u16>().ok())
+		.filter(|value| *value > 0)
+		.unwrap_or(DEFAULT_TOR_HARD_RESET_FAILURE_STREAK)
+}
+
+#[cfg(feature = "tor")]
+fn is_tor_connectivity_error(err: &str) -> bool {
+	let err = err.to_ascii_lowercase();
+	[
+		"tor:",
+		"hidden service",
+		"rendezvous",
+		"introduction point",
+		"failed to obtain circuit",
+		"circuit took too long",
+		"operation timed out",
+		"connection closed before message completed",
+		"unable to connect to hidden service",
+		"client error (connect)",
+	]
+	.into_iter()
+	.any(|pattern| err.contains(pattern))
+}
+
+#[cfg(feature = "tor")]
+fn register_tor_failure(failure: Option<&str>) -> (u16, TorRebuildMode) {
+	let streak = if failure.is_none() || failure.is_some_and(is_tor_connectivity_error) {
+		TOR_FAILURE_STREAK.fetch_add(1, Ordering::SeqCst).saturating_add(1)
+	} else {
+		TOR_FAILURE_STREAK.store(0, Ordering::SeqCst);
+		0
+	};
+
+	let mode = if streak >= tor_hard_reset_failure_streak() {
+		TorRebuildMode::HardReset
+	} else {
+		TorRebuildMode::Soft
+	};
+
+	(streak, mode)
+}
+
+#[cfg(feature = "tor")]
+pub(crate) fn mark_tor_connection_healthy() {
+	TOR_FAILURE_STREAK.store(0, Ordering::SeqCst);
+}
+
+#[cfg(feature = "tor")]
+async fn create_bootstrapped_tor_client(mode: TorRebuildMode) -> Result<TorClient<PreferredRuntime>, String> {
+	if matches!(mode, TorRebuildMode::HardReset) {
+		hard_reset_arti_runtime()?;
+	}
+
+	TorClient::with_runtime(PreferredRuntime::current().expect("Could not get runtime"))
+		.config(build_tor_config())
+		.create_bootstrapped()
+		.await
+		.map_err(|err| err.to_string())
+}
+
 // Custom Tor transport connector implementing tower::Service<Uri>.
-// TLS is layered by hyper-boring so this connector only dials DataStream.
+// TLS is layered by hyper-tls so this connector only dials DataStream.
 #[cfg(feature = "tor")]
 mod tor_connector {
 	use super::*;
@@ -239,28 +416,37 @@ use tor_connector::ArtiConnector;
 #[cfg(feature = "tor")]
 fn build_http_client(tor_client: TorClient<PreferredRuntime>) -> Client<HttpsConnector<ArtiConnector>, Body> {
 	let connector = ArtiConnector::new(tor_client);
-	let https = HttpsConnector::with_connector(connector, android_ssl_connector()).expect("Failed to create Tor HTTPS connector");
+	let mut tls = TlsConnector::builder();
+	tls.danger_accept_invalid_certs(true);
+	tls.danger_accept_invalid_hostnames(true);
+	let https = HttpsConnector::from((connector, tls.build().expect("Failed to create Tor TLS connector").into()));
 	Client::builder(TokioExecutor::new()).build::<_, Body>(https)
 }
 
 #[cfg(feature = "tor")]
 pub static TOR_CLIENT: LazyLock<ArcSwap<TorClient<PreferredRuntime>>> = LazyLock::new(|| {
-	let config = build_tor_config();
-
 	let client = block_on(async {
 		info!("Creating and bootstrapping Tor client...");
-		match TorClient::with_runtime(PreferredRuntime::current().expect("Could not get runtime"))
-			.config(config)
-			.create_bootstrapped()
-			.await
-		{
+		match create_bootstrapped_tor_client(TorRebuildMode::Soft).await {
 			Ok(client) => {
+				mark_tor_connection_healthy();
 				info!("Tor client created and bootstrapped successfully!");
 				client
 			}
-			Err(e) => {
-				error!("Failed to create and bootstrap Tor client: {}", e);
-				panic!("Cannot start without Tor connection: {}", e);
+			Err(first_err) => {
+				error!("Failed to create and bootstrap Tor client with existing state: {}", first_err);
+				warn!("Attempting a hard reset of Arti state/cache before retrying bootstrap...");
+				match create_bootstrapped_tor_client(TorRebuildMode::HardReset).await {
+					Ok(client) => {
+						mark_tor_connection_healthy();
+						info!("Tor client bootstrapped successfully after hard reset");
+						client
+					}
+					Err(recovery_err) => {
+						error!("Failed to create and bootstrap Tor client after hard reset: {}", recovery_err);
+						panic!("Cannot start without Tor connection: {}", recovery_err);
+					}
+				}
 			}
 		}
 	});
@@ -276,30 +462,43 @@ pub static CLIENT: LazyLock<ArcSwap<Client<HttpsConnector<ArtiConnector>, Body>>
 
 #[cfg(feature = "tor")]
 static TOR_IS_REBUILDING: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "tor")]
+static TOR_FAILURE_STREAK: AtomicU16 = AtomicU16::new(0);
+
+#[cfg(feature = "tor")]
+async fn wait_for_tor_rebuild_to_finish() {
+	while TOR_IS_REBUILDING.load(Ordering::SeqCst) {
+		tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+	}
+}
 
 /// Rebuild the Tor client and HTTP client when circuits are broken.
 /// Uses an atomic flag to prevent concurrent rebuilds.
 #[cfg(feature = "tor")]
-async fn rebuild_tor_connection() {
+async fn rebuild_tor_connection_with_mode(mode: TorRebuildMode) {
 	// If already rebuilding, don't start another one
 	if TOR_IS_REBUILDING.swap(true, Ordering::SeqCst) {
-		info!("Tor circuit rebuild already in progress, skipping");
+		info!("Tor circuit rebuild already in progress, waiting for completion");
+		wait_for_tor_rebuild_to_finish().await;
 		return;
 	}
 
-	warn!("Rebuilding Tor client due to connection failure...");
-	let config = build_tor_config();
+	match mode {
+		TorRebuildMode::Soft => warn!("Rebuilding Tor client due to connection failure..."),
+		TorRebuildMode::HardReset => warn!("Hard-resetting Arti state/cache before rebuilding Tor client..."),
+	}
 
-	match TorClient::with_runtime(PreferredRuntime::current().expect("Could not get runtime"))
-		.config(config)
-		.create_bootstrapped()
-		.await
-	{
+	match create_bootstrapped_tor_client(mode).await {
 		Ok(new_tor) => {
 			let new_http = build_http_client(new_tor.clone());
 			TOR_CLIENT.store(Arc::new(new_tor));
 			CLIENT.store(Arc::new(new_http));
-			info!("Tor client rebuilt successfully");
+			if matches!(mode, TorRebuildMode::HardReset) {
+				mark_tor_connection_healthy();
+				info!("Tor client rebuilt successfully after hard reset");
+			} else {
+				info!("Tor client rebuilt successfully");
+			}
 		}
 		Err(e) => {
 			error!("Failed to rebuild Tor client: {}", e);
@@ -307,6 +506,25 @@ async fn rebuild_tor_connection() {
 	}
 
 	TOR_IS_REBUILDING.store(false, Ordering::SeqCst);
+}
+
+#[cfg(feature = "tor")]
+pub(crate) async fn recover_tor_connection(context: &str, failure: Option<&str>) {
+	let (streak, mode) = register_tor_failure(failure);
+	let action = if matches!(mode, TorRebuildMode::HardReset) {
+		"hard-resetting Arti state/cache and rebuilding Tor client"
+	} else {
+		"rebuilding Tor client"
+	};
+
+	match failure {
+		Some(err) if streak > 0 => warn!("{context} failed over Tor (failure streak {streak}, {action}): {err}"),
+		Some(err) => warn!("{context} failed over Tor ({action}): {err}"),
+		None if streak > 0 => warn!("{context} timed out over Tor (failure streak {streak}, {action})"),
+		None => warn!("{context} timed out over Tor ({action})"),
+	}
+
+	rebuild_tor_connection_with_mode(mode).await;
 }
 
 pub static OAUTH_CLIENT: LazyLock<ArcSwap<Oauth>> = LazyLock::new(|| {
@@ -410,57 +628,87 @@ pub async fn proxy(req: Request<Body>, format: &str) -> Result<Response<Body>, S
 	stream(&url, &req).await
 }
 
+fn sanitize_stream_response(res: Response<Incoming>) -> Response<Body> {
+	// Map the response body from Incoming to our Body type
+	let (parts, incoming) = res.into_parts();
+	let body: Body = incoming.map_err(|e| e.to_string()).boxed();
+	let mut res = Response::from_parts(parts, body);
+
+	let mut rm = |key: &str| res.headers_mut().remove(key);
+
+	rm("access-control-expose-headers");
+	rm("server");
+	rm("vary");
+	rm("etag");
+	rm("x-cdn");
+	rm("x-cdn-client-region");
+	rm("x-cdn-name");
+	rm("x-cdn-server-region");
+	rm("x-reddit-cdn");
+	rm("x-reddit-video-features");
+	rm("Nel");
+	rm("Report-To");
+
+	res
+}
+
 async fn stream(url: &str, req: &Request<Body>) -> Result<Response<Body>, String> {
 	// First parameter is target URL (mandatory).
 	let parsed_uri = url.parse::<Uri>().map_err(|_| "Couldn't parse URL".to_string())?;
 
-	// Build the hyper client from the HTTPS connector or Tor connector.
-	let client = CLIENT.load_full();
+	let make_stream_request = || -> Result<Request<Body>, String> {
+		let mut builder = Request::get(parsed_uri.clone());
 
-	let mut builder = Request::get(parsed_uri);
-
-	// Copy useful headers from original request
-	for &key in &["Range", "If-Modified-Since", "Cache-Control"] {
-		if let Some(value) = req.headers().get(key) {
-			builder = builder.header(key, value);
+		// Copy useful headers from original request
+		for &key in &["Range", "If-Modified-Since", "Cache-Control"] {
+			if let Some(value) = req.headers().get(key) {
+				builder = builder.header(key, value);
+			}
 		}
-	}
 
-	// Add User-Agent header of the currently spoofed device
+		// Add User-Agent header of the currently spoofed device
+		{
+			let client = OAUTH_CLIENT.load_full();
+			builder = builder.header("User-Agent", client.user_agent());
+		}
+
+		builder.body(empty()).map_err(|_| "Couldn't build empty body in stream".to_string())
+	};
+
+	#[cfg(feature = "tor")]
 	{
-		let client = OAUTH_CLIENT.load_full();
-		builder = builder.header("User-Agent", client.user_agent());
+		let mut last_err = String::new();
+		let context = format!("Stream request to {url}");
+		for attempt in 1..=3 {
+			let stream_request = make_stream_request()?;
+			let client = CLIENT.load_full();
+			match client.request(stream_request).await {
+				Ok(res) => {
+					mark_tor_connection_healthy();
+					return Ok(sanitize_stream_response(res));
+				}
+				Err(e) => {
+					last_err = format_client_connect_error(&e);
+					if attempt == 3 {
+						return Err(last_err);
+					}
+					recover_tor_connection(&format!("{context} (retry {attempt}/2)"), Some(last_err.as_str())).await;
+				}
+			}
+		}
+		return Err(last_err);
 	}
 
-	let stream_request = builder.body(empty()).map_err(|_| "Couldn't build empty body in stream".to_string())?;
-
-	client
-		.request(stream_request)
-		.await
-		.map(|res| {
-			// Map the response body from Incoming to our Body type
-			let (parts, incoming) = res.into_parts();
-			let body: Body = incoming.map_err(|e| e.to_string()).boxed();
-			let mut res = Response::from_parts(parts, body);
-
-			let mut rm = |key: &str| res.headers_mut().remove(key);
-
-			rm("access-control-expose-headers");
-			rm("server");
-			rm("vary");
-			rm("etag");
-			rm("x-cdn");
-			rm("x-cdn-client-region");
-			rm("x-cdn-name");
-			rm("x-cdn-server-region");
-			rm("x-reddit-cdn");
-			rm("x-reddit-video-features");
-			rm("Nel");
-			rm("Report-To");
-
-			res
-		})
-		.map_err(|e| e.to_string())
+	#[cfg(not(feature = "tor"))]
+	{
+		let stream_request = make_stream_request()?;
+		let client = CLIENT.load_full();
+		client
+			.request(stream_request)
+			.await
+			.map(sanitize_stream_response)
+			.map_err(|e| format_client_connect_error(&e))
+	}
 }
 
 /// Makes a GET request to Reddit at `path`. By default, this will honor HTTP
@@ -598,27 +846,43 @@ async fn execute_request(method: &'static Method, path: &str, redirect: bool, qu
 		}
 		Err(e) => {
 			dbg_msg!("{method} {REDDIT_URL_BASE}{path}: {}", e);
-			Err(e.to_string())
+			Err(format_client_connect_error(&e))
 		}
 	}
 }
 
 /// Makes a request to Reddit. If `redirect` is `true`, `request_with_redirect`
 /// will recurse on the URL that Reddit provides in the Location HTTP header
-/// in its response. On Tor, connection failures trigger a circuit rebuild and
-/// a single retry.
+/// in its response. On Tor, connection failures trigger circuit rebuilds and
+/// bounded retries.
 fn request(method: &'static Method, path: String, redirect: bool, quarantine: bool, base_path: &'static str, host: &'static str) -> Boxed<Result<Response<Body>, String>> {
 	async move {
-		let result = execute_request(method, &path, redirect, quarantine, base_path, host).await;
-
 		#[cfg(feature = "tor")]
-		if result.is_err() {
-			warn!("Request to {path} failed over Tor, rebuilding circuit and retrying...");
-			rebuild_tor_connection().await;
-			return execute_request(method, &path, redirect, quarantine, base_path, host).await;
+		{
+			let mut result = execute_request(method, &path, redirect, quarantine, base_path, host).await;
+			for attempt in 1..=2 {
+				if result.is_ok() {
+					mark_tor_connection_healthy();
+					return result;
+				}
+
+				if let Err(e) = result.as_ref() {
+					recover_tor_connection(&format!("Request to {path} (retry {attempt}/2)"), Some(e.as_str())).await;
+				} else {
+					recover_tor_connection(&format!("Request to {path} (retry {attempt}/2)"), None).await;
+				}
+				result = execute_request(method, &path, redirect, quarantine, base_path, host).await;
+			}
+			if result.is_ok() {
+				mark_tor_connection_healthy();
+			}
+			return result;
 		}
 
-		result
+		#[cfg(not(feature = "tor"))]
+		{
+			execute_request(method, &path, redirect, quarantine, base_path, host).await
+		}
 	}
 	.boxed()
 }

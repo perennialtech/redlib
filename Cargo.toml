@@ -62,8 +62,8 @@ arc-swap = "1.7.1"
 serde_json_path = "0.7.1"
 async-recursion = "1.1.1"
 pulldown-cmark = { version = "0.12.0", features = ["simd", "html"], default-features = false }
-hyper-boring = "5.0.0"
-boring = "5.0.0"
+hyper-tls = "0.6.0"
+openssl-sys = { version = "0.9.109", features = ["vendored"] }
 tegen = "0.1.4"
 serde_urlencoded = "0.7.1"
 chrono = { version = "0.4.39", default-features = false, features = [ "std" ] }
