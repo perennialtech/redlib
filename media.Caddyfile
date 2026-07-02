@@ -1,0 +1,175 @@
+# Caddyfile for Redlib external media proxy
+# Replace media.example.com with your REDLIB_EXTERNAL_MEDIA_DOMAIN
+
+# Whitelist upstream request headers.
+# Start by deleting all request headers, then add back only what Reddit media hosts need.
+#
+# args[0] = upstream Host header / TLS SNI name, for example i.redd.it
+(reddit_media_proxy_headers) {
+	header_up -*
+	header_up Host {args[0]}
+	header_up User-Agent "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	header_up Accept "*/*"
+	header_up Accept-Encoding "identity"
+
+	# Do not let upstream media hosts set cookies on this proxy domain.
+	header_down -Set-Cookie
+}
+
+# Proxy helper.
+#
+# args[0] = upstream dial address, for example i.redd.it:443
+# args[1] = upstream Host header / TLS SNI name, for example i.redd.it
+#
+# Upstreams are intentionally written as host:443, not https://host.
+# Caddy does not allow placeholders inside upstream addresses that contain a scheme.
+# TLS is enabled explicitly with transport http { tls }.
+(proxy_reddit_media) {
+	route {
+		reverse_proxy @range_with_if_range {args[0]} {
+			transport http {
+				tls
+				tls_server_name {args[1]}
+			}
+
+			import reddit_media_proxy_headers {args[1]}
+			header_up Range "{http.request.header.Range}"
+			header_up If-Range "{http.request.header.If-Range}"
+		}
+
+		reverse_proxy @range_request {args[0]} {
+			transport http {
+				tls
+				tls_server_name {args[1]}
+			}
+
+			import reddit_media_proxy_headers {args[1]}
+			header_up Range "{http.request.header.Range}"
+		}
+
+		reverse_proxy {args[0]} {
+			transport http {
+				tls
+				tls_server_name {args[1]}
+			}
+
+			import reddit_media_proxy_headers {args[1]}
+		}
+	}
+}
+
+media.example.com {
+	# Reject non-media methods.
+	@bad_methods {
+		not {
+			method GET HEAD OPTIONS
+		}
+	}
+
+	# CORS preflight.
+	@options method OPTIONS
+
+	# Optional upstream request-header whitelist branches.
+	@range_with_if_range {
+		header Range *
+		header If-Range *
+	}
+
+	@range_request header Range *
+
+	@vid_dash path_regexp vid_dash ^/vid/([A-Za-z0-9_-]+)/dash/(.+)$
+	@vid_cmaf path_regexp vid_cmaf ^/vid/([A-Za-z0-9_-]+)/cmaf/(.+)$
+	@hls path_regexp hls ^/hls/([A-Za-z0-9_-]+)/(.+)$
+	@img path_regexp img ^/img/(.+)$
+
+	# DNS-label-shaped thumbnail subdomain.
+	@thumb path_regexp thumb ^/thumb/([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)/(.+)$
+
+	@emoji path_regexp emoji ^/emoji/([^/]+)/(.+)$
+	@emote path_regexp emote ^/emote/([A-Za-z0-9_-]+)/(.+)$
+	@preview_pre path_regexp preview_pre ^/preview/pre/(.+)$
+	@preview_external_pre path_regexp preview_external_pre ^/preview/external-pre/(.+)$
+	@style path_regexp style ^/style/(.+)$
+	@static path_regexp static ^/static/(.+)$
+
+	route {
+		# Helpful for cross-origin media loading from the main Redlib domain.
+		header {
+			Access-Control-Allow-Origin "*"
+			Access-Control-Allow-Methods "GET, HEAD, OPTIONS"
+			Access-Control-Allow-Headers "Range, If-Range"
+			Access-Control-Expose-Headers "Accept-Ranges, Content-Length, Content-Range, Content-Type, ETag, Last-Modified, Cache-Control"
+			Cross-Origin-Resource-Policy cross-origin
+			X-Content-Type-Options nosniff
+		}
+
+		handle @bad_methods {
+			header Allow "GET, HEAD, OPTIONS"
+			respond "method not allowed" 405
+		}
+
+		handle @options {
+			header Allow "GET, HEAD, OPTIONS"
+			respond 204
+		}
+
+		handle @vid_dash {
+			rewrite /{re.vid_dash.1}/DASH_{re.vid_dash.2}
+			import proxy_reddit_media v.redd.it:443 v.redd.it
+		}
+
+		handle @vid_cmaf {
+			rewrite /{re.vid_cmaf.1}/CMAF_{re.vid_cmaf.2}
+			import proxy_reddit_media v.redd.it:443 v.redd.it
+		}
+
+		handle @hls {
+			rewrite /{re.hls.1}/{re.hls.2}
+			import proxy_reddit_media v.redd.it:443 v.redd.it
+		}
+
+		handle @img {
+			rewrite /{re.img.1}
+			import proxy_reddit_media i.redd.it:443 i.redd.it
+		}
+
+		handle @thumb {
+			rewrite /{re.thumb.2}
+			import proxy_reddit_media {re.thumb.1}.thumbs.redditmedia.com:443 {re.thumb.1}.thumbs.redditmedia.com
+		}
+
+		handle @emoji {
+			rewrite /{re.emoji.1}/{re.emoji.2}
+			import proxy_reddit_media emoji.redditmedia.com:443 emoji.redditmedia.com
+		}
+
+		handle @emote {
+			rewrite /asset-manager/{re.emote.1}/{re.emote.2}
+			import proxy_reddit_media reddit-econ-prod-assets-permanent.s3.amazonaws.com:443 reddit-econ-prod-assets-permanent.s3.amazonaws.com
+		}
+
+		handle @preview_pre {
+			rewrite /{re.preview_pre.1}
+			import proxy_reddit_media preview.redd.it:443 preview.redd.it
+		}
+
+		handle @preview_external_pre {
+			rewrite /{re.preview_external_pre.1}
+			import proxy_reddit_media external-preview.redd.it:443 external-preview.redd.it
+		}
+
+		handle @style {
+			rewrite /{re.style.1}
+			import proxy_reddit_media styles.redditmedia.com:443 styles.redditmedia.com
+		}
+
+		handle @static {
+			rewrite /{re.static.1}
+			import proxy_reddit_media www.redditstatic.com:443 www.redditstatic.com
+		}
+
+		handle {
+			respond "not found" 404
+		}
+	}
+}

@@ -129,6 +129,7 @@ impl InstanceInfo {
 				["RSS enabled", &convert(&self.config.enable_rss)],
 				["Full URL", &convert(&self.config.full_url)],
 				["Remove default feeds", &convert(&self.config.default_remove_default_feeds)],
+				["External media domain", &convert(&self.config.external_media_domain)],
 				//TODO: fallback to crate::config::DEFAULT_PUSHSHIFT_FRONTEND
 			])
 			.with_header_row(["Settings"]),
@@ -171,6 +172,7 @@ impl InstanceInfo {
 				RSS enabled: {:?}\n
 				Full URL: {:?}\n
 				Remove default feeds: {:?}\n
+				External media domain: {:?}\n
                 Config:\n
                     Banner: {:?}\n
                     Hide awards: {:?}\n
@@ -198,6 +200,7 @@ impl InstanceInfo {
 					self.config.enable_rss,
 					self.config.full_url,
 					self.config.default_remove_default_feeds,
+					self.config.external_media_domain,
 					self.config.pushshift,
 					self.config.banner,
 					self.config.default_hide_awards,

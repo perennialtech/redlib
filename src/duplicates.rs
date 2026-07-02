@@ -186,10 +186,10 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 								before.push_str(&duplicates[0].id);
 							}
 						}
-						Err(msg) => {
+						Err(e) => {
 							// Abort entirely if we couldn't get the previous
 							// batch.
-							return error(req, &msg).await;
+							return error(req, e.status, &e.message).await;
 						}
 					}
 				} else {
@@ -209,12 +209,12 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 		}
 
 		// Process error.
-		Err(msg) => {
-			if msg == "quarantined" || msg == "gated" {
+		Err(e) => {
+			if e.message == "quarantined" || e.message == "gated" {
 				let sub = req.param("sub").unwrap_or_default();
-				Ok(quarantine(&req, sub, &msg))
+				Ok(quarantine(&req, sub, &e.message))
 			} else {
-				error(req, &msg).await
+				error(req, e.status, &e.message).await
 			}
 		}
 	}

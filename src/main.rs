@@ -204,12 +204,21 @@ async fn main() {
 	info!("Creating OAUTH client.");
 	LazyLock::force(&OAUTH_CLIENT);
 
+	let mut csp = "default-src 'none'; font-src 'self'; script-src 'self' blob:; manifest-src 'self'; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; worker-src blob:;".to_string();
+
+	if let Some(domain) = config::get_setting("REDLIB_EXTERNAL_MEDIA_DOMAIN").filter(|d| !d.is_empty()) {
+		let clean_domain = domain.trim_start_matches("https://").trim_start_matches("http://");
+		csp.push_str(&format!(" media-src 'self' data: blob: about: https://{clean_domain} http://{clean_domain}; img-src 'self' data: https://{clean_domain} http://{clean_domain}; connect-src 'self' https://{clean_domain} http://{clean_domain};"));
+	} else {
+		csp.push_str(" media-src 'self' data: blob: about:; img-src 'self' data:; connect-src 'self';");
+	}
+
 	// Define default headers (added to all responses)
 	app.default_headers = headers! {
 		"Referrer-Policy" => "no-referrer",
 		"X-Content-Type-Options" => "nosniff",
 		"X-Frame-Options" => "DENY",
-		"Content-Security-Policy" => "default-src 'none'; font-src 'self'; script-src 'self' blob:; manifest-src 'self'; media-src 'self' data: blob: about:; style-src 'self' 'unsafe-inline'; base-uri 'none'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; connect-src 'self'; worker-src blob:;"
+		"Content-Security-Policy" => &csp
 	};
 
 	if let Some(expire_time) = hsts {
@@ -284,7 +293,7 @@ async fn main() {
 	app.at("/u/:name/comments/:id/:title").get(|r| post::item(r).boxed());
 	app.at("/u/:name/comments/:id/:title/:comment_id").get(|r| post::item(r).boxed());
 
-	app.at("/user/[deleted]").get(|req| error(req, "User has deleted their account").boxed());
+	app.at("/user/[deleted]").get(|req| error(req, 404, "User has deleted their account").boxed());
 	app.at("/user/:name.rss").get(|r| user::rss(r).boxed());
 	app.at("/user/:name").get(|r| user::profile(r).boxed());
 	app.at("/user/:name/:listing").get(|r| user::profile(r).boxed());
@@ -360,7 +369,7 @@ async fn main() {
 	app.at("/search").get(|r| search::find(r).boxed());
 
 	// Handle about pages
-	app.at("/about").get(|req| error(req, "About pages aren't added yet").boxed());
+	app.at("/about").get(|req| error(req, 404, "About pages aren't added yet").boxed());
 
 	// Instance info page
 	app.at("/info").get(|r| instance_info::instance_info(r).boxed());
@@ -375,12 +384,12 @@ async fn main() {
 				// Share link
 				Some(id) if (8..12).contains(&id.len()) => match canonical_path(format!("/r/{sub}/s/{id}"), 3).await {
 					Ok(Some(path)) => Ok(redirect(&path)),
-					Ok(None) => error(req, "Post ID is invalid. It may point to a post on a community that has been banned.").await,
-					Err(e) => error(req, &e).await,
+					Ok(None) => error(req, 404, "Post ID is invalid. It may point to a post on a community that has been banned.").await,
+					Err(e) => error(req, 500, &e).await,
 				},
 
 				// Error message for unknown pages
-				_ => error(req, "Nothing here").await,
+				_ => error(req, 404, "Nothing here").await,
 			}
 		})
 	});
@@ -395,19 +404,19 @@ async fn main() {
 				Some(id) if (5..8).contains(&id.len()) => match canonical_path(format!("/comments/{id}"), 3).await {
 					Ok(path_opt) => match path_opt {
 						Some(path) => Ok(redirect(&path)),
-						None => error(req, "Post ID is invalid. It may point to a post on a community that has been banned.").await,
+						None => error(req, 404, "Post ID is invalid. It may point to a post on a community that has been banned.").await,
 					},
-					Err(e) => error(req, &e).await,
+					Err(e) => error(req, 500, &e).await,
 				},
 
 				// Error message for unknown pages
-				_ => error(req, "Nothing here").await,
+				_ => error(req, 404, "Nothing here").await,
 			}
 		})
 	});
 
 	// Default service in case no routes match
-	app.at("/*").get(|req| error(req, "Nothing here").boxed());
+	app.at("/*").get(|req| error(req, 404, "Nothing here").boxed());
 
 	println!("Running Redlib v{} on {listener}!", env!("CARGO_PKG_VERSION"));
 
