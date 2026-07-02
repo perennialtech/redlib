@@ -1026,7 +1026,7 @@ async fn self_check(sub: &str) -> Result<(), String> {
 
 	match Post::fetch(&query, true).await {
 		Ok(_) => Ok(()),
-		Err(e) => Err(e),
+		Err(e) => Err(e.message),
 	}
 }
 
