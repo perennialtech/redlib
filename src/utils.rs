@@ -359,18 +359,18 @@ pub struct Post {
 
 impl Post {
 	/// Fetch posts of a user or subreddit and return a vector of posts and the "after" value
-	pub async fn fetch(path: &str, quarantine: bool) -> Result<(Vec<Self>, String), String> {
+	pub async fn fetch(path: &str, quarantine: bool) -> Result<(Vec<Self>, String), crate::client::ApiError> {
 		// Send a request to the url
 		let res = match json(path.to_string(), quarantine).await {
 			// If success, receive JSON in response
 			Ok(response) => response,
 			// If the Reddit API returns an error, exit this function
-			Err(msg) => return Err(msg),
+			Err(e) => return Err(e),
 		};
 
 		// Fetch the list of posts from the JSON response
 		let Some(post_list) = res["data"]["children"].as_array() else {
-			return Err("No posts found".to_string());
+			return Err(crate::client::ApiError::new(500, "No posts found"));
 		};
 
 		let mut posts: Vec<Self> = Vec::new();
@@ -997,7 +997,7 @@ pub async fn catch_random(sub: &str, additional: &str) -> Result<Response<Body>,
 	if sub == "random" || sub == "randnsfw" {
 		Ok(redirect(&format!(
 			"/r/{}{additional}",
-			json(format!("/r/{sub}/about.json?raw_json=1"), false).await?["data"]["display_name"]
+			json(format!("/r/{sub}/about.json?raw_json=1"), false).await.map_err(|e| e.message)?["data"]["display_name"]
 				.as_str()
 				.unwrap_or_default()
 		)))
@@ -1021,6 +1021,19 @@ static REGEX_URL_EXTERNAL_PREVIEW: LazyLock<Regex> = LazyLock::new(|| Regex::new
 static REGEX_URL_STYLES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://styles\.redditmedia\.com/(.*)").unwrap());
 static REGEX_URL_STATIC_MEDIA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://www\.redditstatic\.com/(.*)").unwrap());
 
+pub fn external_media_prefix() -> &'static str {
+	static PREFIX: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+		if let Some(domain) = crate::config::get_setting("REDLIB_EXTERNAL_MEDIA_DOMAIN") {
+			if !domain.is_empty() {
+				let clean_domain = domain.trim_start_matches("https://").trim_start_matches("http://");
+				return format!("https://{clean_domain}");
+			}
+		}
+		String::new()
+	});
+	&PREFIX
+}
+
 /// Direct urls to proxy if proxy is enabled
 pub fn format_url(url: &str) -> String {
 	if url.is_empty() || url == "self" || url == "default" || url == "nsfw" || url == "spoiler" {
@@ -1028,12 +1041,25 @@ pub fn format_url(url: &str) -> String {
 	} else {
 		Url::parse(url).map_or(url.to_string(), |parsed| {
 			let domain = parsed.domain().unwrap_or_default();
+			let prefix = external_media_prefix();
 
 			let capture = |regex: &Regex, format: &str, segments: i16| {
 				regex.captures(url).map_or(String::new(), |caps| match segments {
-					1 => [format, &caps[1]].join(""),
-					2 => [format, &caps[1], "/", &caps[2]].join(""),
-					3 => [format, &caps[1], "/", &caps[2], "/", &caps[3]].join(""),
+					1 => {
+						if caps.len() > 2 {
+							[prefix, format, &caps[2]].join("")
+						} else {
+							[prefix, format, &caps[1]].join("")
+						}
+					},
+					2 => {
+						if caps.len() > 3 {
+							[prefix, format, &caps[2], "/", &caps[3]].join("")
+						} else {
+							[prefix, format, &caps[1], "/", &caps[2]].join("")
+						}
+					},
+					3 => [prefix, format, &caps[1], "/", &caps[2].to_lowercase().as_str(), "/", &caps[3]].join(""),
 					_ => String::new(),
 				})
 			};
@@ -1094,7 +1120,7 @@ pub fn render_bullet_lists(input_text: &str) -> String {
 static REDDIT_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"href="(https|http|)://(www\.|old\.|np\.|amp\.|new\.|)(reddit\.com|redd\.it)/"#).unwrap());
 static REDDIT_PREVIEW_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://(external-preview|preview|i)\.redd\.it(.*)").unwrap());
 static REDDIT_EMOJI_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://(www|).redditstatic\.com/(.*)").unwrap());
-static REDLIB_PREVIEW_LINK_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"/(img|preview/)(pre|external-pre)?/(.*?)>"#).unwrap());
+static REDLIB_PREVIEW_LINK_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(https://[^/]+/|/)(img|preview/)(pre|external-pre)?/(.*?)>"#).unwrap());
 static REDLIB_PREVIEW_TEXT_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r">(.*?)</a>").unwrap());
 
 /// Rewrite Reddit links to Redlib in body of text
@@ -1157,9 +1183,10 @@ pub fn rewrite_urls(input_text: &str) -> String {
 				"external-preview" => "/preview/external-pre",
 				_ => "/img",
 			};
+			let prefix = external_media_prefix();
 
 			text1 = REDDIT_PREVIEW_REGEX
-				.replace(&text1, format!("{_preview_type}$2"))
+				.replace(&text1, format!("{prefix}{_preview_type}$2"))
 				.replace(&image_to_replace, &_image_replacement)
 		}
 	}
@@ -1226,10 +1253,11 @@ pub fn rewrite_emotes(media_metadata: &Value, comment: String) -> String {
 				/* Reddit sends a size for the image based on whether it's alone or accompanied by text.
 				It's a good idea and makes everything look nicer, so we'll do the same. */
 				let size = media_metadata.json_path(&size_path).first().unwrap().to_string();
+				let prefix = external_media_prefix();
 
 				// Replace the ID we found earlier in the comment with the respective image and it's link from the regex capture
 				let to_replace_with = format!(
-					"<img loading=\"lazy\" src=\"/emote/{} width=\"{size}\" height=\"{size}\" style=\"vertical-align:text-bottom\">",
+					"<img loading=\"lazy\" src=\"{prefix}/emote/{} width=\"{size}\" height=\"{size}\" style=\"vertical-align:text-bottom\">",
 					&link_capture[1]
 				);
 
@@ -1324,7 +1352,7 @@ pub fn redirect(path: &str) -> Response<Body> {
 }
 
 /// Renders a generic error landing page.
-pub async fn error(req: Request<Body>, msg: &str) -> Result<Response<Body>, String> {
+pub async fn error(req: Request<Body>, status: u16, msg: &str) -> Result<Response<Body>, String> {
 	error!("Error page rendered: {}", msg.split('|').next().unwrap_or_default());
 	let url = req.uri().to_string();
 	let body = ErrorTemplate {
@@ -1335,7 +1363,7 @@ pub async fn error(req: Request<Body>, msg: &str) -> Result<Response<Body>, Stri
 	.render()
 	.unwrap_or_default();
 
-	Ok(Response::builder().status(404).header("content-type", "text/html").body(body.into()).unwrap_or_default())
+	Ok(Response::builder().status(status).header("content-type", "text/html").body(body.into()).unwrap_or_default())
 }
 
 /// Renders a generic info landing page.

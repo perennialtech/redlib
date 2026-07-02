@@ -18,6 +18,18 @@ use wreq::redirect::Policy;
 use wreq::{header as wreq_header, Client as WreqClient, EmulationFactory, Method, Response as WreqResponse};
 use wreq_util::{Emulation, EmulationOS, EmulationOption};
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ApiError {
+	pub status: u16,
+	pub message: String,
+}
+
+impl ApiError {
+	pub fn new(status: u16, message: impl Into<String>) -> Self {
+		Self { status, message: message.into() }
+	}
+}
+
 const REDDIT_URL_BASE: &str = "https://oauth.reddit.com";
 const REDDIT_URL_BASE_HOST: &str = "oauth.reddit.com";
 
@@ -320,11 +332,11 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 
 /// Make a request to a Reddit API and parse the JSON response
 #[cached(size = 100, time = 30, result = true)]
-pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
+pub async fn json(path: String, quarantine: bool) -> Result<Value, ApiError> {
 	// Closure to quickly build errors
-	let err = |msg: &str, e: String, path: String| -> Result<Value, String> {
+	let err = |msg: &str, status: u16, e: String, path: String| -> Result<Value, ApiError> {
 		// eprintln!("{} - {}: {}", url, msg, e);
-		Err(format!("{msg}: {e} | {path}"))
+		Err(ApiError::new(status, format!("{msg}: {e} | {path}")))
 	};
 
 	// First, handle rolling over the OAUTH_CLIENT if need be.
@@ -370,11 +382,11 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 						// Rate limited, so spawn a force_refresh_token()
 						tokio::spawn(force_refresh_token());
 						return match reset {
-							Some(val) => Err(format!(
+							Some(val) => Err(ApiError::new(429, format!(
 								"Reddit rate limit exceeded. Try refreshing in a few seconds.\
 								 Rate limit will reset in: {val}"
-							)),
-							None => Err("Reddit rate limit exceeded".to_string()),
+							))),
+							None => Err(ApiError::new(429, "Reddit rate limit exceeded")),
 						};
 					}
 
@@ -387,7 +399,7 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 							if let Some(data) = json.get("data") {
 								if let Some(is_suspended) = data.get("is_suspended").and_then(Value::as_bool) {
 									if is_suspended {
-										return Err("suspended".into());
+										return Err(ApiError::new(404, "suspended"));
 									}
 								}
 							}
@@ -398,27 +410,28 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 								if json["message"] == "Unauthorized" {
 									error!("Forcing a token refresh");
 									let () = force_refresh_token().await;
-									return Err("OAuth token has expired. Please refresh the page!".to_string());
+									return Err(ApiError::new(401, "OAuth token has expired. Please refresh the page!"));
 								}
 
 								// Handle quarantined
 								if json["reason"] == "quarantined" {
-									return Err("quarantined".into());
+									return Err(ApiError::new(403, "quarantined"));
 								}
 								// Handle gated
 								if json["reason"] == "gated" {
-									return Err("gated".into());
+									return Err(ApiError::new(403, "gated"));
 								}
 								// Handle private subs
 								if json["reason"] == "private" {
-									return Err("private".into());
+									return Err(ApiError::new(403, "private"));
 								}
 								// Handle banned subs
 								if json["reason"] == "banned" {
-									return Err("banned".into());
+									return Err(ApiError::new(404, "banned"));
 								}
 
-								Err(format!("Reddit error {} \"{}\": {} | {path}", json["error"], json["reason"], json["message"]))
+								let json_err_status = json["error"].as_i64().unwrap_or(500) as u16;
+								Err(ApiError::new(json_err_status, format!("Reddit error {} \"{}\": {} | {path}", json["error"], json["reason"], json["message"])))
 							} else {
 								Ok(json)
 							}
@@ -426,17 +439,17 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 						Err(e) => {
 							error!("Got an invalid response from reddit {e}. Status code: {status}");
 							if status.is_server_error() {
-								Err("Reddit is having issues, check if there's an outage".to_string())
+								Err(ApiError::new(status.as_u16(), "Reddit is having issues, check if there's an outage"))
 							} else {
-								err("Failed to parse page JSON data", e.to_string(), path)
+								err("Failed to parse page JSON data", status.as_u16(), e.to_string(), path)
 							}
 						}
 					}
 				}
-				Err(e) => err("Failed receiving body from Reddit", e.to_string(), path),
+				Err(e) => err("Failed receiving body from Reddit", status.as_u16(), e.to_string(), path),
 			}
 		}
-		Err(e) => err("Couldn't send request to Reddit", e, path),
+		Err(e) => err("Couldn't send request to Reddit", 500, e, path),
 	}
 }
 
@@ -445,7 +458,7 @@ async fn self_check(sub: &str) -> Result<(), String> {
 
 	match Post::fetch(&query, true).await {
 		Ok(_) => Ok(()),
-		Err(e) => Err(e),
+		Err(e) => Err(e.message),
 	}
 }
 
@@ -546,14 +559,14 @@ mod tests {
 	async fn test_private_sub() {
 		let link = json("/r/suicide/about.json?raw_json=1".into(), true).await;
 		assert!(link.is_err());
-		assert_eq!(link, Err("private".into()));
+		assert_eq!(link.unwrap_err().message, "private");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_banned_sub() {
 		let link = json("/r/aaa/about.json?raw_json=1".into(), true).await;
 		assert!(link.is_err());
-		assert_eq!(link, Err("banned".into()));
+		assert_eq!(link.unwrap_err().message, "banned");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
@@ -561,6 +574,6 @@ mod tests {
 		// quarantine to false to specifically catch when we _don't_ catch it
 		let link = json("/r/drugs/about.json?raw_json=1".into(), false).await;
 		assert!(link.is_err());
-		assert_eq!(link, Err("gated".into()));
+		assert_eq!(link.unwrap_err().message, "gated");
 	}
 }

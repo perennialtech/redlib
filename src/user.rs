@@ -99,13 +99,13 @@ pub async fn profile(req: Request<Body>) -> Result<Response<Body>, String> {
 				}))
 			}
 			// If there is an error show error page
-			Err(msg) => error(req, &msg).await,
+			Err(e) => error(req, e.status, &e.message).await,
 		}
 	}
 }
 
 // USER
-async fn user(name: &str) -> Result<User, String> {
+async fn user(name: &str) -> Result<User, crate::client::ApiError> {
 	// Build the Reddit JSON API path
 	let path: String = format!("/user/{name}/about.json?raw_json=1");
 
@@ -134,7 +134,7 @@ async fn user(name: &str) -> Result<User, String> {
 
 pub async fn rss(req: Request<Body>) -> Result<Response<Body>, String> {
 	if config::get_setting("REDLIB_ENABLE_RSS").is_none() {
-		return Ok(error(req, "RSS is disabled on this instance.").await.unwrap_or_default());
+		return Ok(error(req, 403, "RSS is disabled on this instance.").await.unwrap_or_default());
 	}
 	use crate::utils::rewrite_urls;
 	use hyper::header::CONTENT_TYPE;
@@ -152,7 +152,7 @@ pub async fn rss(req: Request<Body>) -> Result<Response<Body>, String> {
 	let user_obj = user(&user_str).await.unwrap_or_default();
 
 	// Get posts
-	let (posts, _) = Post::fetch(&path, false).await?;
+	let (posts, _) = Post::fetch(&path, false).await.map_err(|e| e.message)?;
 
 	// Build the RSS feed
 	let channel = ChannelBuilder::default()
