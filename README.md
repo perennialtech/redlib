@@ -92,11 +92,12 @@ If you are looking to compare, the biggest differences I have noticed are:
 
 While originating as a fork of Libreddit, the name "Redlib" was adopted to avoid legal issues, as Reddit only allows the use of their name if structured as "XYZ For Reddit".
 
-Several technical improvements have also been made, including:
+Several technical improvements are included:
 
-- **OAuth token spoofing**: To circumvent rate limits imposed by Reddit, OAuth token spoofing is used to mimick the most common iOS and Android clients. While spoofing both iOS and Android clients was explored, only the Android client was chosen due to content restrictions when using an anonymous iOS client.
-- **Token refreshing**: The authentication token is refreshed every 24 hours, emulating the behavior of the official Android app.
-- **HTTP header mimicking**: Efforts are made to send along as many of the official app's headers as possible to reduce the likelihood of Reddit's crackdown on Redlib's requests.
+- **Reddit API session pool**: Redlib uses a configurable pool of independently authenticated Reddit API sessions. Each session has its own OAuth identity, backend state, access token lifecycle, rate-limit state, and request pressure tracking.
+- **Rate-limit-aware routing**: Reddit API requests are assigned to ready sessions by a selector that accounts for remaining quota, cooldowns, token freshness, in-flight pressure, and recent failures.
+- **OAuth backend policies**: Each session can authenticate with mobile-spoof, generic-web, or automatic fallback backend policy.
+- **HTTP header mimicking**: Reddit API sessions send backend/device headers needed for API compatibility while media proxying avoids OAuth authorization and does not consume API quota.
 
 ---
 
@@ -378,6 +379,20 @@ You can also configure Redlib with a configuration file named `redlib.toml`. For
 ```toml
 REDLIB_DEFAULT_WIDE = "on"
 REDLIB_DEFAULT_USE_HLS = "on"
+
+[reddit]
+session_count = 4
+startup_policy = "require_all"
+startup_min_healthy_sessions = 4
+backend_policy = "auto"
+selection_policy = "rate_limit_aware"
+bootstrap_concurrency = 4
+reserve_remaining_per_session = 2
+refresh_margin_seconds = 120
+refresh_jitter_seconds = 30
+request_timeout_seconds = 5
+max_attempts_per_api_request = 3
+quota_exhaustion_policy = "cooldown"
 ```
 
 > [!NOTE]
@@ -403,6 +418,25 @@ Redlib supports the following command line flags:
 - `-a`, `--address <ADDRESS>`: Sets address to listen on. Default is `[::]`.
 - `-p`, `--port <PORT>`: Port to listen on. Default is `8080`.
 - `-H`, `--hsts <EXPIRE_TIME>`: HSTS header to tell browsers that this site should only be accessed over HTTPS. Default is `604800`.
+
+## Reddit API session pool
+
+Redlib uses a Reddit API session pool. Each session has an independent OAuth identity, token lifecycle, rate-limit state, and backend state. `reddit.session_count` controls the number of active sessions. Requests are assigned to sessions by a rate-limit-aware selector.
+
+| Environment variable                                  | TOML key                                      | Possible values                              | Default            | Description                                                                        |
+|-------------------------------------------------------|-----------------------------------------------|----------------------------------------------|--------------------|------------------------------------------------------------------------------------|
+| `REDLIB_REDDIT_SESSION_COUNT`                         | `reddit.session_count`                        | Integer `>= 1`                               | `10`                | Number of active Reddit API sessions.                                              |
+| `REDLIB_REDDIT_STARTUP_POLICY`                        | `reddit.startup_policy`                       | `require_all`, `require_min`                 | `require_all`      | Startup readiness policy for the session pool.                                     |
+| `REDLIB_REDDIT_STARTUP_MIN_HEALTHY_SESSIONS`          | `reddit.startup_min_healthy_sessions`         | Integer `>= 1` and `<= session_count`        | `1`                | Minimum ready sessions required when startup policy is `require_min`.              |
+| `REDLIB_REDDIT_BACKEND_POLICY`                        | `reddit.backend_policy`                       | `auto`, `mobile_spoof`, `generic_web`        | `auto`             | OAuth backend creation policy for each session.                                    |
+| `REDLIB_REDDIT_SELECTION_POLICY`                      | `reddit.selection_policy`                     | `rate_limit_aware`                           | `rate_limit_aware` | Session selection policy for Reddit API requests.                                  |
+| `REDLIB_REDDIT_BOOTSTRAP_CONCURRENCY`                 | `reddit.bootstrap_concurrency`                | Integer `>= 1`                               | `1`                | Maximum number of sessions authenticated concurrently during startup.              |
+| `REDLIB_REDDIT_RESERVE_REMAINING_PER_SESSION`         | `reddit.reserve_remaining_per_session`        | Integer `0-65535`                            | `2`                | Per-session remaining quota reserve before normal selection skips the session.      |
+| `REDLIB_REDDIT_REFRESH_MARGIN_SECONDS`                | `reddit.refresh_margin_seconds`               | Positive integer seconds                     | `120`              | How early a session refreshes before token expiry.                                 |
+| `REDLIB_REDDIT_REFRESH_JITTER_SECONDS`                | `reddit.refresh_jitter_seconds`               | Non-negative integer seconds                 | `30`               | Random refresh jitter to avoid synchronized refreshes.                             |
+| `REDLIB_REDDIT_REQUEST_TIMEOUT_SECONDS`               | `reddit.request_timeout_seconds`              | Positive integer seconds                     | `5`                | Timeout for Reddit API requests and OAuth authentication.                          |
+| `REDLIB_REDDIT_MAX_ATTEMPTS_PER_API_REQUEST`          | `reddit.max_attempts_per_api_request`         | Integer `>= 1`                               | `3`                | Maximum attempts for a Reddit API request across eligible sessions.                |
+| `REDLIB_REDDIT_QUOTA_EXHAUSTION_POLICY`               | `reddit.quota_exhaustion_policy`              | `cooldown`, `rotate`                         | `cooldown`         | Quota handling policy: wait for reset or explicitly rotate session identity.        |
 
 ## Instance settings
 

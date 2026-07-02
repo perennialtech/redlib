@@ -110,10 +110,12 @@ impl InstanceInfo {
 	fn to_table(&self) -> String {
 		let mut container = Container::default();
 		let convert = |o: &Option<String>| -> String { o.clone().unwrap_or_else(|| "<span class=\"unset\"><i>Unset</i></span>".to_owned()) };
-		if let Some(banner) = &self.config.banner {
+		let convert_str = |s: &str| -> String { if s.is_empty() { "<span class=\"unset\"><i>Unset</i></span>".to_owned() } else { s.to_owned() } };
+		let convert_bool = |b: bool| -> String { if b { "true".to_owned() } else { "false".to_owned() } };
+		if !self.config.instance.banner.is_empty() {
 			container.add_header(3, "Instance banner");
 			container.add_raw("<br />");
-			container.add_paragraph(banner);
+			container.add_paragraph(&self.config.instance.banner);
 			container.add_raw("<br />");
 		}
 		container.add_table(
@@ -124,12 +126,12 @@ impl InstanceInfo {
 				["Deploy date", &self.deploy_date],
 				["Deploy timestamp", &self.deploy_unix_ts.to_string()],
 				["Compile mode", &self.compile_mode],
-				["SFW only", &convert(&self.config.sfw_only)],
-				["Pushshift frontend", &convert(&self.config.pushshift)],
-				["RSS enabled", &convert(&self.config.enable_rss)],
-				["Full URL", &convert(&self.config.full_url)],
-				["Remove default feeds", &convert(&self.config.default_remove_default_feeds)],
-				["External media domain", &convert(&self.config.external_media_domain)],
+				["SFW only", &convert_bool(self.config.instance.sfw_only)],
+				["Pushshift frontend", &convert_str(&self.config.instance.pushshift_frontend)],
+				["RSS enabled", &convert_bool(self.config.instance.enable_rss)],
+				["Full URL", &convert(&self.config.instance.full_url)],
+				["Remove default feeds", &convert_bool(self.config.defaults.remove_default_feeds)],
+				["External media domain", &convert(&self.config.instance.external_media_domain)],
 				//TODO: fallback to crate::config::DEFAULT_PUSHSHIFT_FRONTEND
 			])
 			.with_header_row(["Settings"]),
@@ -137,21 +139,21 @@ impl InstanceInfo {
 		container.add_raw("<br />");
 		container.add_table(
 			Table::from([
-				["Hide awards", &convert(&self.config.default_hide_awards)],
-				["Hide score", &convert(&self.config.default_hide_score)],
-				["Theme", &convert(&self.config.default_theme)],
-				["Front page", &convert(&self.config.default_front_page)],
-				["Layout", &convert(&self.config.default_layout)],
-				["Wide", &convert(&self.config.default_wide)],
-				["Comment sort", &convert(&self.config.default_comment_sort)],
-				["Post sort", &convert(&self.config.default_post_sort)],
-				["Blur Spoiler", &convert(&self.config.default_blur_spoiler)],
-				["Show NSFW", &convert(&self.config.default_show_nsfw)],
-				["Blur NSFW", &convert(&self.config.default_blur_nsfw)],
-				["Use HLS", &convert(&self.config.default_use_hls)],
-				["Hide HLS notification", &convert(&self.config.default_hide_hls_notification)],
-				["Subscriptions", &convert(&self.config.default_subscriptions)],
-				["Filters", &convert(&self.config.default_filters)],
+				["Hide awards", &convert_bool(self.config.defaults.hide_awards)],
+				["Hide score", &convert_bool(self.config.defaults.hide_score)],
+				["Theme", &convert_str(&self.config.defaults.theme)],
+				["Front page", &convert_str(&self.config.defaults.front_page)],
+				["Layout", &convert_str(&self.config.defaults.layout)],
+				["Wide", &convert_bool(self.config.defaults.wide)],
+				["Comment sort", &convert_str(&self.config.defaults.comment_sort)],
+				["Post sort", &convert_str(&self.config.defaults.post_sort)],
+				["Blur Spoiler", &convert_bool(self.config.defaults.blur_spoiler)],
+				["Show NSFW", &convert_bool(self.config.defaults.show_nsfw)],
+				["Blur NSFW", &convert_bool(self.config.defaults.blur_nsfw)],
+				["Use HLS", &convert_bool(self.config.defaults.use_hls)],
+				["Hide HLS notification", &convert_bool(self.config.defaults.hide_hls_notification)],
+				["Subscriptions", &convert_str(&self.config.defaults.subscriptions)],
+				["Filters", &convert_str(&self.config.defaults.filters)],
 			])
 			.with_header_row(["Default preferences"]),
 		);
@@ -196,28 +198,28 @@ impl InstanceInfo {
 					self.deploy_date,
 					self.deploy_unix_ts,
 					self.compile_mode,
-					self.config.sfw_only,
-					self.config.enable_rss,
-					self.config.full_url,
-					self.config.default_remove_default_feeds,
-					self.config.external_media_domain,
-					self.config.pushshift,
-					self.config.banner,
-					self.config.default_hide_awards,
-					self.config.default_hide_score,
-					self.config.default_theme,
-					self.config.default_front_page,
-					self.config.default_layout,
-					self.config.default_wide,
-					self.config.default_comment_sort,
-					self.config.default_post_sort,
-					self.config.default_blur_spoiler,
-					self.config.default_show_nsfw,
-					self.config.default_blur_nsfw,
-					self.config.default_use_hls,
-					self.config.default_hide_hls_notification,
-					self.config.default_subscriptions,
-					self.config.default_filters,
+					self.config.instance.sfw_only,
+					self.config.instance.pushshift_frontend,
+					self.config.instance.enable_rss,
+					self.config.instance.full_url,
+					self.config.defaults.remove_default_feeds,
+					self.config.instance.external_media_domain,
+					self.config.instance.banner,
+					self.config.defaults.hide_awards,
+					self.config.defaults.hide_score,
+					self.config.defaults.theme,
+					self.config.defaults.front_page,
+					self.config.defaults.layout,
+					self.config.defaults.wide,
+					self.config.defaults.comment_sort,
+					self.config.defaults.post_sort,
+					self.config.defaults.blur_spoiler,
+					self.config.defaults.show_nsfw,
+					self.config.defaults.blur_nsfw,
+					self.config.defaults.use_hls,
+					self.config.defaults.hide_hls_notification,
+					self.config.defaults.subscriptions,
+					self.config.defaults.filters,
 				)
 			}
 			StringType::Html => self.to_table(),

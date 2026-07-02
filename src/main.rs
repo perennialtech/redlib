@@ -9,12 +9,11 @@ use std::sync::LazyLock;
 use futures_lite::FutureExt;
 use hyper::{header::HeaderValue, Body, Request, Response};
 use log::{info, warn};
-use redlib::client::{canonical_path, proxy, rate_limit_check, CLIENT};
+use redlib::app_state::AppState;
+use redlib::client::{canonical_path, install_reddit_gateway, proxy, CLIENT};
 use redlib::server::{self, RequestExt};
 use redlib::utils::{error, redirect, ThemeAssets};
 use redlib::{config, duplicates, headers, instance_info, post, search, settings, subreddit, user};
-
-use redlib::client::OAUTH_CLIENT;
 
 // Create Services
 
@@ -157,15 +156,25 @@ async fn main() {
 		)
 		.get_matches();
 
-	match rate_limit_check().await {
+	info!("Loading typed configuration.");
+	let typed_config = LazyLock::force(&config::CONFIG).clone();
+
+	info!("Creating application state and Reddit API session pool.");
+	let state = std::sync::Arc::new(AppState::new(typed_config).await.unwrap_or_else(|err| {
+		eprintln!("Failed to initialize Reddit API session pool: {err}");
+		std::process::exit(1);
+	}));
+	install_reddit_gateway(state.reddit.clone());
+
+	match state.reddit.health_check(false).await {
 		Ok(()) => {
-			info!("[✅] Rate limit check passed");
+			info!("[✅] Reddit gateway health check passed");
 		}
 		Err(e) => {
-			let mut message = format!("Rate limit check failed: {e}");
-			message += "\nThis may cause issues with the rate limit.";
+			let mut message = format!("Reddit gateway health check failed: {e}");
+			message += "\nThis may cause issues with Reddit API availability.";
 			message += "\nPlease report this error with the above information.";
-			message += "\nhttps://github.com/redlib-org/redlib/issues/new?assignees=sigaloid&labels=bug&title=%F0%9F%90%9B+Bug+Report%3A+Rate+limit+mismatch";
+			message += "\nhttps://github.com/redlib-org/redlib/issues/new?labels=bug";
 			warn!("{}", message);
 			eprintln!("{message}");
 		}
@@ -192,17 +201,11 @@ async fn main() {
 	let mut app = server::Server::new();
 
 	// Force evaluation of statics. In instance_info case, we need to evaluate
-	// the timestamp so deploy date is accurate - in config case, we need to
-	// evaluate the configuration to avoid paying penalty at first request -
-	// in OAUTH case, we need to retrieve the token to avoid paying penalty
-	// at first request
+	// the timestamp so deploy date is accurate. Configuration and Reddit API
+	// sessions are already owned by AppState.
 
-	info!("Evaluating config.");
-	LazyLock::force(&config::CONFIG);
 	info!("Evaluating instance info.");
 	LazyLock::force(&instance_info::INSTANCE_INFO);
-	info!("Creating OAUTH client.");
-	LazyLock::force(&OAUTH_CLIENT);
 
 	let mut csp = "default-src 'none'; font-src 'self'; script-src 'self' blob:; manifest-src 'self'; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; worker-src blob:;".to_string();
 
@@ -267,8 +270,8 @@ async fn main() {
 		.get(|_| resource(include_str!("../static/check_update.js"), "text/javascript", false).boxed());
 	app.at("/copy.js").get(|_| resource(include_str!("../static/copy.js"), "text/javascript", false).boxed());
 
-	app.at("/commits.atom").get(|_| async move { proxy_commit_info().await }.boxed());
-	app.at("/instances.json").get(|_| async move { proxy_instances().await }.boxed());
+	app.at("/commits.atom").get(|_| proxy_commit_info().boxed());
+	app.at("/instances.json").get(|_| proxy_instances().boxed());
 
 	// Proxy media through Redlib
 	app.at("/vid/:id/:prefix/:size").get(|r| proxy(r, "https://v.redd.it/{id}/{prefix}_{size}").boxed());

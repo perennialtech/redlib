@@ -370,7 +370,7 @@ impl Post {
 
 		// Fetch the list of posts from the JSON response
 		let Some(post_list) = res["data"]["children"].as_array() else {
-			return Err(crate::client::ApiError::new(500, "No posts found"));
+			return Err(crate::client::ApiError::new(500, crate::client::ApiErrorKind::RedditJson, "No posts found"));
 		};
 
 		let mut posts: Vec<Self> = Vec::new();

@@ -82,6 +82,42 @@
     },
     "REDLIB_EXTERNAL_MEDIA_DOMAIN": {
       "required": false
+    },
+    "REDLIB_REDDIT_SESSION_COUNT": {
+      "required": false
+    },
+    "REDLIB_REDDIT_STARTUP_POLICY": {
+      "required": false
+    },
+    "REDLIB_REDDIT_STARTUP_MIN_HEALTHY_SESSIONS": {
+      "required": false
+    },
+    "REDLIB_REDDIT_BACKEND_POLICY": {
+      "required": false
+    },
+    "REDLIB_REDDIT_SELECTION_POLICY": {
+      "required": false
+    },
+    "REDLIB_REDDIT_BOOTSTRAP_CONCURRENCY": {
+      "required": false
+    },
+    "REDLIB_REDDIT_RESERVE_REMAINING_PER_SESSION": {
+      "required": false
+    },
+    "REDLIB_REDDIT_REFRESH_MARGIN_SECONDS": {
+      "required": false
+    },
+    "REDLIB_REDDIT_REFRESH_JITTER_SECONDS": {
+      "required": false
+    },
+    "REDLIB_REDDIT_REQUEST_TIMEOUT_SECONDS": {
+      "required": false
+    },
+    "REDLIB_REDDIT_MAX_ATTEMPTS_PER_API_REQUEST": {
+      "required": false
+    },
+    "REDLIB_REDDIT_QUOTA_EXHAUSTION_POLICY": {
+      "required": false
     }
   }
 }
