@@ -2,9 +2,9 @@ use std::{collections::HashMap, sync::atomic::Ordering, time::Duration};
 
 use crate::{
 	body::full,
-	client::{CLIENT, OAUTH_CLIENT, OAUTH_IS_ROLLING_OVER, OAUTH_RATELIMIT_REMAINING},
 	oauth_resources::ANDROID_APP_VERSION_LIST,
 };
+use std::sync::Arc;
 #[cfg(feature = "tor")]
 use crate::client::{mark_tor_connection_healthy, recover_tor_connection};
 use base64::{engine::general_purpose, Engine as _};
@@ -35,7 +35,7 @@ pub struct OauthResponse {
 
 // Trait for OAuth backend implementations
 trait OauthBackend: Send + Sync {
-	fn authenticate(&mut self) -> impl std::future::Future<Output = Result<OauthResponse, AuthError>> + Send;
+	fn authenticate(&mut self, http_client: Arc<crate::client::HttpClient>) -> impl std::future::Future<Output = Result<OauthResponse, AuthError>> + Send;
 	fn user_agent(&self) -> &str;
 	fn get_headers(&self) -> HashMap<String, String>;
 }
@@ -48,10 +48,10 @@ pub(crate) enum OauthBackendImpl {
 }
 
 impl OauthBackend for OauthBackendImpl {
-	async fn authenticate(&mut self) -> Result<OauthResponse, AuthError> {
+	async fn authenticate(&mut self, http_client: Arc<crate::client::HttpClient>) -> Result<OauthResponse, AuthError> {
 		match self {
-			OauthBackendImpl::MobileSpoof(backend) => backend.authenticate().await,
-			OauthBackendImpl::GenericWeb(backend) => backend.authenticate().await,
+			OauthBackendImpl::MobileSpoof(backend) => backend.authenticate(http_client).await,
+			OauthBackendImpl::GenericWeb(backend) => backend.authenticate(http_client).await,
 		}
 	}
 
@@ -74,19 +74,19 @@ impl OauthBackend for OauthBackendImpl {
 #[derive(Debug, Clone)]
 pub struct Oauth {
 	pub(crate) headers_map: HashMap<String, String>,
-	expires_in: u64,
+	pub(crate) expires_at: i64,
 	pub(crate) backend: OauthBackendImpl,
 }
 
 impl Oauth {
 	/// Create a new OAuth client
-	pub(crate) async fn new() -> Self {
+	pub(crate) async fn new(http_client: &crate::client::HttpClient) -> Self {
 		// Try MobileSpoofAuth first, then fall back to GenericWebAuth
 		let mut failure_count = 0;
 		let mut backend = OauthBackendImpl::MobileSpoof(MobileSpoofAuth::new());
 
 		loop {
-			let attempt = Self::new_with_timeout_with_backend(backend.clone()).await;
+			let attempt = Self::new_with_timeout_with_backend(backend.clone(), http_client.clone()).await;
 			match attempt {
 				Ok(Ok(oauth)) => {
 					#[cfg(feature = "tor")]
@@ -137,9 +137,9 @@ impl Oauth {
 		}
 	}
 
-	async fn new_with_timeout_with_backend(mut backend: OauthBackendImpl) -> Result<Result<Self, AuthError>, Elapsed> {
+	async fn new_with_timeout_with_backend(mut backend: OauthBackendImpl, http_client: crate::client::HttpClient) -> Result<Result<Self, AuthError>, Elapsed> {
 		timeout(OAUTH_REQUEST_TIMEOUT, async move {
-			let response = backend.authenticate().await?;
+			let response = backend.authenticate(Arc::new(http_client)).await?;
 
 			// Build headers_map from backend headers + Authorization header
 			let mut headers_map = backend.get_headers();
@@ -148,7 +148,7 @@ impl Oauth {
 
 			Ok(Self {
 				headers_map,
-				expires_in: response.expires_in,
+				expires_at: time::OffsetDateTime::now_utc().unix_timestamp() + (response.expires_in as i64),
 				backend,
 			})
 		})
@@ -191,38 +191,52 @@ impl From<serde_json::Error> for AuthError {
 }
 
 pub async fn token_daemon() {
-	// Monitor for refreshing token
+	// Monitor for refreshing tokens across the session pool
 	loop {
-		// Get expiry time - be sure to not hold the read lock
-		let expires_in = { OAUTH_CLIENT.load_full().expires_in };
+		let now = time::OffsetDateTime::now_utc().unix_timestamp();
+		let mut min_expires_at = i64::MAX;
 
-		// sleep for the expiry time minus 2 minutes
-		let duration = Duration::from_secs(expires_in - 120);
+		for session in crate::client::SESSION_POOL.iter() {
+			let expires_at = session.oauth.load().expires_at;
+			if expires_at < min_expires_at {
+				min_expires_at = expires_at;
+			}
+		}
 
-		info!("[⏳] Waiting for {duration:?} seconds before refreshing OAuth token...");
+		let sleep_until = min_expires_at.saturating_sub(120);
+		// Give it at least 5 seconds before checking again to avoid spin-locking if something goes wrong
+		let sleep_duration = sleep_until.saturating_sub(now).max(5);
 
+		let duration = Duration::from_secs(sleep_duration as u64);
+
+		info!("[⏳] Waiting for {duration:?} seconds before refreshing nearest expiring OAuth token in pool...");
 		tokio::time::sleep(duration).await;
+		info!("[⌛] {duration:?} Elapsed! Initiating targeted token refresh sweeps...");
 
-		info!("[⌛] {duration:?} Elapsed! Refreshing OAuth token...");
-
-		// Refresh token - in its own scope
-		{
-			force_refresh_token().await;
+		let now_after = time::OffsetDateTime::now_utc().unix_timestamp();
+		for session in crate::client::SESSION_POOL.iter() {
+			if session.oauth.load().expires_at.saturating_sub(now_after) <= 120 {
+				let s = session.clone();
+				tokio::spawn(async move {
+					force_refresh_token(s).await;
+				});
+			}
 		}
 	}
 }
 
-pub async fn force_refresh_token() {
-	if OAUTH_IS_ROLLING_OVER.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-		trace!("Skipping refresh token roll over, already in progress");
+pub async fn force_refresh_token(session: Arc<crate::client::Session>) {
+	if session.is_rolling_over.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+		trace!("Skipping refresh token roll over, already in progress for this session");
 		return;
 	}
 
-	trace!("Rolling over refresh token. Current rate limit: {}", OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst));
-	let new_client = Oauth::new().await;
-	OAUTH_CLIENT.swap(new_client.into());
-	OAUTH_RATELIMIT_REMAINING.store(99, Ordering::SeqCst);
-	OAUTH_IS_ROLLING_OVER.store(false, Ordering::SeqCst);
+	trace!("Rolling over refresh token. Current session rate limit: {}", session.ratelimit_remaining.load(Ordering::SeqCst));
+	let http_client = session.http_client.load_full();
+	let new_oauth = Oauth::new(&http_client).await;
+	session.oauth.store(Arc::new(new_oauth));
+	session.ratelimit_remaining.store(99, Ordering::SeqCst);
+	session.is_rolling_over.store(false, Ordering::SeqCst);
 }
 
 #[derive(Debug, Clone, Default)]
@@ -250,7 +264,7 @@ impl MobileSpoofAuth {
 }
 
 impl OauthBackend for MobileSpoofAuth {
-	async fn authenticate(&mut self) -> Result<OauthResponse, AuthError> {
+	async fn authenticate(&mut self, http_client: Arc<crate::client::HttpClient>) -> Result<OauthResponse, AuthError> {
 		// Construct URL for OAuth token
 		let url = format!("{AUTH_ENDPOINT}/auth/v2/oauth/access-token/loid");
 		let mut builder = Request::builder().method(Method::POST).uri(&url);
@@ -277,9 +291,8 @@ impl OauthBackend for MobileSpoofAuth {
 
 		trace!("Sending token request...\n\n{request:?}");
 
-		// Send request
-		let client = CLIENT.load_full();
-		let resp = client.request(request).await?;
+		// Send request using the isolated HTTP client
+		let resp = http_client.request(request).await?;
 
 		trace!("Received response with status {} and length {:?}", resp.status(), resp.headers().get("content-length"));
 		trace!("OAuth headers: {:#?}", resp.headers());
@@ -369,7 +382,7 @@ impl GenericWebAuth {
 }
 
 impl OauthBackend for GenericWebAuth {
-	async fn authenticate(&mut self) -> Result<OauthResponse, AuthError> {
+	async fn authenticate(&mut self, http_client: Arc<crate::client::HttpClient>) -> Result<OauthResponse, AuthError> {
 		// Construct URL for OAuth token
 		let url = "https://www.reddit.com/api/v1/access_token";
 		let mut builder = Request::builder().method(Method::POST).uri(url);
@@ -394,9 +407,8 @@ impl OauthBackend for GenericWebAuth {
 
 		trace!("Sending GenericWebAuth token request...\n\n{request:?}");
 
-		// Send request
-		let client = CLIENT.load_full();
-		let resp = client.request(request).await?;
+		// Send request using isolated HTTP client
+		let resp = http_client.request(request).await?;
 
 		trace!("Received response with status {} and length {:?}", resp.status(), resp.headers().get("content-length"));
 		trace!("GenericWebAuth headers: {:#?}", resp.headers());
@@ -514,7 +526,8 @@ fn choose<T: Copy>(list: &[T]) -> T {
 async fn test_mobile_spoof_backend() {
 	// Test MobileSpoofAuth backend specifically
 	let mut backend = MobileSpoofAuth::new();
-	let response = backend.authenticate().await;
+	let http_client = Arc::new(crate::client::create_http_client());
+	let response = backend.authenticate(http_client).await;
 	assert!(response.is_ok());
 	let response = response.unwrap();
 	assert!(!response.token.is_empty());
@@ -527,7 +540,8 @@ async fn test_mobile_spoof_backend() {
 async fn test_generic_web_backend() {
 	// Test GenericWebAuth backend specifically
 	let mut backend = GenericWebAuth::new();
-	let response = backend.authenticate().await;
+	let http_client = Arc::new(crate::client::create_http_client());
+	let response = backend.authenticate(http_client).await;
 	assert!(response.is_ok());
 	let response = response.unwrap();
 	assert!(!response.token.is_empty());
@@ -538,24 +552,28 @@ async fn test_generic_web_backend() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_oauth_client() {
 	// Integration test - tests the overall Oauth client
-	assert!(OAUTH_CLIENT.load_full().headers_map.contains_key("Authorization"));
+    let session = crate::client::SESSION_POOL[0].clone();
+	assert!(session.oauth.load_full().headers_map.contains_key("Authorization"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_oauth_client_refresh() {
-	force_refresh_token().await;
+    let session = crate::client::SESSION_POOL[0].clone();
+	force_refresh_token(session).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_oauth_token_exists() {
-	let client = OAUTH_CLIENT.load_full();
-	let auth_header = client.headers_map.get("Authorization").unwrap();
+    let session = crate::client::SESSION_POOL[0].clone();
+	let oauth = session.oauth.load_full();
+	let auth_header = oauth.headers_map.get("Authorization").unwrap();
 	assert!(auth_header.starts_with("Bearer "));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_oauth_headers_len() {
-	assert!(OAUTH_CLIENT.load_full().headers_map.len() >= 3);
+    let session = crate::client::SESSION_POOL[0].clone();
+	assert!(session.oauth.load_full().headers_map.len() >= 3);
 }
 
 #[test]

@@ -14,7 +14,7 @@ use std::{
 };
 use time::{Duration, OffsetDateTime};
 
-use crate::{client::CLIENT, config, server::RequestExt};
+use crate::{client::SESSION_POOL, config, server::RequestExt};
 use hyper::Request as HyperRequest;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -385,7 +385,8 @@ async fn fetch_chrome_stable_major() -> Result<u32, String> {
 		.map_err(|e| format!("Invalid Chrome VersionHistory URI: {e}"))?;
 
 	let req = HyperRequest::get(uri).body(empty()).map_err(|e| format!("Failed to build Chrome version request: {e}"))?;
-	let resp = CLIENT.load_full().request(req).await.map_err(|e| format!("Failed to fetch Chrome version: {e}"))?;
+	let http_client = SESSION_POOL[0].http_client.load_full();
+	let resp = http_client.request(req).await.map_err(|e| format!("Failed to fetch Chrome version: {e}"))?;
 	let bytes = resp.into_body().collect()
 		.await
 		.map_err(|e| format!("Failed to read Chrome version body: {e}"))?.to_bytes();
@@ -403,7 +404,8 @@ async fn fetch_firefox_stable_major() -> Result<u32, String> {
 		.map_err(|e| format!("Invalid Firefox versions URI: {e}"))?;
 
 	let req = HyperRequest::get(uri).body(empty()).map_err(|e| format!("Failed to build Firefox version request: {e}"))?;
-	let resp = CLIENT.load_full().request(req).await.map_err(|e| format!("Failed to fetch Firefox version: {e}"))?;
+	let http_client = SESSION_POOL[0].http_client.load_full();
+	let resp = http_client.request(req).await.map_err(|e| format!("Failed to fetch Firefox version: {e}"))?;
 	let bytes = resp.into_body().collect()
 		.await
 		.map_err(|e| format!("Failed to read Firefox version body: {e}"))?.to_bytes();

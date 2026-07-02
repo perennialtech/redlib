@@ -137,6 +137,9 @@ pub struct Config {
 
 	#[serde(rename = "REDLIB_EXTERNAL_MEDIA_DOMAIN")]
 	pub(crate) external_media_domain: Option<String>,
+
+	#[serde(rename = "REDLIB_SESSION_POOL_SIZE")]
+	pub(crate) session_pool_size: Option<String>,
 }
 
 impl Config {
@@ -192,6 +195,7 @@ impl Config {
 			fingerprint_blocklist: parse("REDLIB_FINGERPRINT_BLOCKLIST"),
 			fingerprint_secret: parse("REDLIB_FINGERPRINT_SECRET"),
 			external_media_domain: parse("REDLIB_EXTERNAL_MEDIA_DOMAIN"),
+			session_pool_size: parse("REDLIB_SESSION_POOL_SIZE"),
 		}
 	}
 }
@@ -229,6 +233,7 @@ fn get_setting_from_config(name: &str, config: &Config) -> Option<String> {
 		"REDLIB_FINGERPRINT_BLOCKLIST" => config.fingerprint_blocklist.clone(),
 		"REDLIB_FINGERPRINT_SECRET" => config.fingerprint_secret.clone(),
 		"REDLIB_EXTERNAL_MEDIA_DOMAIN" => config.external_media_domain.clone(),
+		"REDLIB_SESSION_POOL_SIZE" => config.session_pool_size.clone(),
 		_ => None,
 	}
 }

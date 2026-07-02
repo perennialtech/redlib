@@ -100,6 +100,9 @@
     },
     "REDLIB_EXTERNAL_MEDIA_DOMAIN": {
       "required": false
+    },
+    "REDLIB_SESSION_POOL_SIZE": {
+      "required": false
     }
   }
 }

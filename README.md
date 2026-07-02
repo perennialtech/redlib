@@ -432,6 +432,7 @@ Assign a default value for each instance-specific setting by passing environment
 | `FINGERPRINT_SCORE_THRESHOLD` | Integer    | `50`                   | Detection threshold; lower values block more clients.                                                     |
 | `FINGERPRINT_BLOCKLIST`   | Comma-separated hex IDs | (empty)        | Fingerprint IDs to always block (from `/__fp/verify` responses).                                          |
 | `EXTERNAL_MEDIA_DOMAIN`   | String          | (empty)                | Domain name for the external media service that handles proxying.                                           |
+| `SESSION_POOL_SIZE`       | Integer         | `10`                   | Number of isolated HTTP clients and OAuth tokens to maintain in the session pool.                         |
 | `UA` (implicit)           | (auto)          | (auto)             | When fingerprinting is on, UA age gating blocks Chromium-family browsers older than ~11 major versions |
 
 ## Default user settings

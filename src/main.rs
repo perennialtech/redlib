@@ -13,12 +13,10 @@ use hyper::{header::HeaderValue, Request, Response};
 use http_body_util::BodyExt;
 use log::{info, warn};
 use redlib::body::{Body, full, empty};
-use redlib::client::{canonical_path, proxy, rate_limit_check, CLIENT};
+use redlib::client::{canonical_path, proxy, rate_limit_check};
 use redlib::server::{self, RequestExt};
 use redlib::utils::{error, redirect, ThemeAssets};
 use redlib::{config, duplicates, fingerprint, headers, instance_info, post, search, settings, subreddit, user};
-
-use redlib::client::OAUTH_CLIENT;
 
 // Create Services
 
@@ -205,8 +203,8 @@ async fn main() {
 	LazyLock::force(&config::CONFIG);
 	info!("Evaluating instance info.");
 	LazyLock::force(&instance_info::INSTANCE_INFO);
-	info!("Creating OAUTH client.");
-	LazyLock::force(&OAUTH_CLIENT);
+	info!("Creating session pool with isolated clients and OAuth tokens.");
+	LazyLock::force(&redlib::client::SESSION_POOL);
 	// Refresh browser version data (Chrome stable + iOS) used for UA age gating.
 	fingerprint::start_ua_versions_daemon();
 
@@ -456,7 +454,8 @@ async fn fetch_commit_info() -> String {
 	let uri = Uri::from_str("https://github.com/redlib-org/redlib/commits/main.atom").expect("Invalid URI");
 
 	let req = Request::get(uri).body(empty()).expect("Failed to build request");
-	let resp = CLIENT.load_full().request(req).await.expect("Failed to request GitHub");
+	let http_client = redlib::client::SESSION_POOL[0].http_client.load_full();
+	let resp = http_client.request(req).await.expect("Failed to request GitHub");
 
 	resp.into_body().collect().await.expect("Failed to read body").to_bytes().iter().copied().map(|x| x as char).collect()
 }
@@ -476,7 +475,8 @@ async fn fetch_instances() -> String {
 	let uri = Uri::from_str("https://raw.githubusercontent.com/redlib-org/redlib-instances/refs/heads/main/instances.json").expect("Invalid URI");
 
 	let req = Request::get(uri).body(empty()).expect("Failed to build request");
-	let resp = CLIENT.load_full().request(req).await.expect("Failed to request GitHub");
+	let http_client = redlib::client::SESSION_POOL[0].http_client.load_full();
+	let resp = http_client.request(req).await.expect("Failed to request GitHub");
 
 	resp.into_body().collect().await.expect("Failed to read body").to_bytes().iter().copied().map(|x| x as char).collect()
 }

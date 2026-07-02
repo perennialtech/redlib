@@ -45,7 +45,7 @@ impl Error {
 #[cfg(any(feature = "tor", test))]
 use crate::config::get_setting;
 use crate::dbg_msg;
-use crate::oauth::{force_refresh_token, token_daemon, Oauth, OauthBackendImpl};
+use crate::oauth::{force_refresh_token, OauthBackendImpl};
 use crate::server::RequestExt;
 use crate::utils::{format_url, Post};
 
@@ -110,11 +110,12 @@ fn format_client_connect_error(err: &hyper_util::client::legacy::Error) -> Strin
 // --- Non-Tor client ---
 
 #[cfg(not(feature = "tor"))]
-pub static HTTPS_CONNECTOR: LazyLock<HttpsConnector<HttpConnector>> = LazyLock::new(HttpsConnector::new);
+pub type HttpClient = Client<HttpsConnector<HttpConnector>, Body>;
 
 #[cfg(not(feature = "tor"))]
-pub static CLIENT: LazyLock<ArcSwap<Client<HttpsConnector<HttpConnector>, Body>>> =
-	LazyLock::new(|| ArcSwap::new(Arc::new(Client::builder(TokioExecutor::new()).build::<_, Body>(HTTPS_CONNECTOR.clone()))));
+pub fn create_http_client() -> HttpClient {
+	Client::builder(TokioExecutor::new()).build::<_, Body>(HttpsConnector::new())
+}
 
 // --- Tor client ---
 
@@ -426,7 +427,15 @@ mod tor_connector {
 use tor_connector::ArtiConnector;
 
 #[cfg(feature = "tor")]
-fn build_http_client(tor_client: TorClient<PreferredRuntime>) -> Client<HttpsConnector<ArtiConnector>, Body> {
+pub type HttpClient = Client<HttpsConnector<ArtiConnector>, Body>;
+
+#[cfg(feature = "tor")]
+pub fn create_http_client() -> HttpClient {
+	build_http_client((**TOR_CLIENT.load()).clone())
+}
+
+#[cfg(feature = "tor")]
+fn build_http_client(tor_client: TorClient<PreferredRuntime>) -> HttpClient {
 	let connector = ArtiConnector::new(tor_client);
 	let mut tls = TlsConnector::builder();
 	tls.danger_accept_invalid_certs(true);
@@ -466,11 +475,47 @@ pub static TOR_CLIENT: LazyLock<ArcSwap<TorClient<PreferredRuntime>>> = LazyLock
 	ArcSwap::new(Arc::new(client))
 });
 
-#[cfg(feature = "tor")]
-pub static CLIENT: LazyLock<ArcSwap<Client<HttpsConnector<ArtiConnector>, Body>>> = LazyLock::new(|| {
-	let tor_client = (**TOR_CLIENT.load()).clone();
-	ArcSwap::new(Arc::new(build_http_client(tor_client)))
+pub struct Session {
+	pub http_client: ArcSwap<HttpClient>,
+	pub oauth: ArcSwap<crate::oauth::Oauth>,
+	pub ratelimit_remaining: AtomicU16,
+	pub is_rolling_over: AtomicBool,
+}
+
+pub static SESSION_POOL: LazyLock<Vec<Arc<Session>>> = LazyLock::new(|| {
+	let pool_size = crate::config::get_setting("REDLIB_SESSION_POOL_SIZE")
+		.and_then(|v| v.parse::<usize>().ok())
+		.filter(|&v| v > 0)
+		.unwrap_or(10);
+
+	info!("Initializing session pool with {} sessions. This may take a moment...", pool_size);
+
+	let sessions = block_on(async {
+		let mut pool = Vec::with_capacity(pool_size);
+		for i in 0..pool_size {
+			info!("Bootstrapping session {}/{}...", i + 1, pool_size);
+			let http_client = create_http_client();
+			let oauth = crate::oauth::Oauth::new(&http_client).await;
+			pool.push(Arc::new(Session {
+				http_client: ArcSwap::from_pointee(http_client),
+				oauth: ArcSwap::from_pointee(oauth),
+				ratelimit_remaining: AtomicU16::new(99),
+				is_rolling_over: AtomicBool::new(false),
+			}));
+		}
+		pool
+	});
+
+	tokio::spawn(crate::oauth::token_daemon());
+	sessions
 });
+
+pub static ROUND_ROBIN_INDEX: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn get_session() -> Arc<Session> {
+	let idx = ROUND_ROBIN_INDEX.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % SESSION_POOL.len();
+	SESSION_POOL[idx].clone()
+}
 
 #[cfg(feature = "tor")]
 static TOR_IS_REBUILDING: AtomicBool = AtomicBool::new(false);
@@ -502,9 +547,10 @@ async fn rebuild_tor_connection_with_mode(mode: TorRebuildMode) {
 
 	match create_bootstrapped_tor_client(mode).await {
 		Ok(new_tor) => {
-			let new_http = build_http_client(new_tor.clone());
-			TOR_CLIENT.store(Arc::new(new_tor));
-			CLIENT.store(Arc::new(new_http));
+			TOR_CLIENT.store(Arc::new(new_tor.clone()));
+			for session in SESSION_POOL.iter() {
+				session.http_client.store(Arc::new(build_http_client(new_tor.clone())));
+			}
 			if matches!(mode, TorRebuildMode::HardReset) {
 				mark_tor_connection_healthy();
 				info!("Tor client rebuilt successfully after hard reset");
@@ -539,15 +585,6 @@ pub(crate) async fn recover_tor_connection(context: &str, failure: Option<&str>)
 	rebuild_tor_connection_with_mode(mode).await;
 }
 
-pub static OAUTH_CLIENT: LazyLock<ArcSwap<Oauth>> = LazyLock::new(|| {
-	let client = block_on(Oauth::new());
-	tokio::spawn(token_daemon());
-	ArcSwap::new(client.into())
-});
-
-pub static OAUTH_RATELIMIT_REMAINING: AtomicU16 = AtomicU16::new(99);
-
-pub static OAUTH_IS_ROLLING_OVER: AtomicBool = AtomicBool::new(false);
 
 const URL_PAIRS: [(&str, &str); 2] = [
 	(ALTERNATIVE_REDDIT_URL_BASE, ALTERNATIVE_REDDIT_URL_BASE_HOST),
@@ -573,11 +610,13 @@ pub async fn canonical_path(path: String, tries: i8) -> Result<Option<String>, S
 		return Ok(None);
 	}
 
+    let session = get_session();
+
 	// for each URL pair, try the HEAD request
 	let res = {
 		let mut res = None;
 		for (url_base, url_base_host) in URL_PAIRS {
-			res = reddit_short_head(path.clone(), true, url_base, url_base_host).await.ok();
+			res = reddit_short_head(path.clone(), true, url_base, url_base_host, session.clone()).await.ok();
 			if let Some(res) = &res {
 				if !res.status().is_client_error() {
 					break;
@@ -667,6 +706,7 @@ fn sanitize_stream_response(res: Response<Incoming>) -> Response<Body> {
 async fn stream(url: &str, req: &Request<Body>) -> Result<Response<Body>, String> {
 	// First parameter is target URL (mandatory).
 	let parsed_uri = url.parse::<Uri>().map_err(|_| "Couldn't parse URL".to_string())?;
+	let session = get_session();
 
 	let make_stream_request = || -> Result<Request<Body>, String> {
 		let mut builder = Request::get(parsed_uri.clone());
@@ -680,8 +720,8 @@ async fn stream(url: &str, req: &Request<Body>) -> Result<Response<Body>, String
 
 		// Add User-Agent header of the currently spoofed device
 		{
-			let client = OAUTH_CLIENT.load_full();
-			builder = builder.header("User-Agent", client.user_agent());
+			let oauth = session.oauth.load_full();
+			builder = builder.header("User-Agent", oauth.user_agent());
 		}
 
 		builder.body(empty()).map_err(|_| "Couldn't build empty body in stream".to_string())
@@ -693,8 +733,8 @@ async fn stream(url: &str, req: &Request<Body>) -> Result<Response<Body>, String
 		let context = format!("Stream request to {url}");
 		for attempt in 1..=3 {
 			let stream_request = make_stream_request()?;
-			let client = CLIENT.load_full();
-			match client.request(stream_request).await {
+			let http_client = session.http_client.load_full();
+			match http_client.request(stream_request).await {
 				Ok(res) => {
 					mark_tor_connection_healthy();
 					return Ok(sanitize_stream_response(res));
@@ -714,8 +754,8 @@ async fn stream(url: &str, req: &Request<Body>) -> Result<Response<Body>, String
 	#[cfg(not(feature = "tor"))]
 	{
 		let stream_request = make_stream_request()?;
-		let client = CLIENT.load_full();
-		client
+		let http_client = session.http_client.load_full();
+		http_client
 			.request(stream_request)
 			.await
 			.map(sanitize_stream_response)
@@ -725,17 +765,17 @@ async fn stream(url: &str, req: &Request<Body>) -> Result<Response<Body>, String
 
 /// Makes a GET request to Reddit at `path`. By default, this will honor HTTP
 /// 3xx codes Reddit returns and will automatically redirect.
-fn reddit_get(path: String, quarantine: bool) -> Boxed<Result<Response<Body>, String>> {
-	request(&Method::GET, path, true, quarantine, REDDIT_URL_BASE, REDDIT_URL_BASE_HOST)
+fn reddit_get(path: String, quarantine: bool, session: Arc<Session>) -> Boxed<Result<Response<Body>, String>> {
+	request(&Method::GET, path, true, quarantine, REDDIT_URL_BASE, REDDIT_URL_BASE_HOST, session)
 }
 
 /// Makes a HEAD request to Reddit at `path, using the short URL base. This will not follow redirects.
-fn reddit_short_head(path: String, quarantine: bool, base_path: &'static str, host: &'static str) -> Boxed<Result<Response<Body>, String>> {
-	request(&Method::HEAD, path, false, quarantine, base_path, host)
+fn reddit_short_head(path: String, quarantine: bool, base_path: &'static str, host: &'static str, session: Arc<Session>) -> Boxed<Result<Response<Body>, String>> {
+	request(&Method::HEAD, path, false, quarantine, base_path, host, session)
 }
 
 /// Build a Reddit API request with shuffled headers.
-fn build_reddit_request(method: &Method, url: &str, quarantine: bool, host: &str) -> Result<Request<Body>, String> {
+fn build_reddit_request(method: &Method, url: &str, quarantine: bool, host: &str, session: &Session) -> Result<Request<Body>, String> {
 	let mut headers: Vec<(String, String)> = vec![
 		("Host".into(), host.into()),
 		("Accept-Encoding".into(), if *method == Method::GET { "gzip".into() } else { "identity".into() }),
@@ -750,8 +790,8 @@ fn build_reddit_request(method: &Method, url: &str, quarantine: bool, host: &str
 	];
 
 	{
-		let client = OAUTH_CLIENT.load_full();
-		for (key, value) in client.headers_map.clone() {
+		let oauth = session.oauth.load_full();
+		for (key, value) in oauth.headers_map.clone() {
 			headers.push((key, value));
 		}
 	}
@@ -769,13 +809,13 @@ fn build_reddit_request(method: &Method, url: &str, quarantine: bool, host: &str
 }
 
 /// Execute a single request attempt against Reddit, handling redirects and decompression.
-async fn execute_request(method: &'static Method, path: &str, redirect: bool, quarantine: bool, base_path: &'static str, host: &'static str) -> Result<Response<Body>, String> {
+async fn execute_request(method: &'static Method, path: &str, redirect: bool, quarantine: bool, base_path: &'static str, host: &'static str, session: Arc<Session>) -> Result<Response<Body>, String> {
 	let url = format!("{base_path}{path}");
-	let client = CLIENT.load_full();
+	let http_client = session.http_client.load_full();
 
-	let req = build_reddit_request(method, &url, quarantine, host)?;
+	let req = build_reddit_request(method, &url, quarantine, host, &session)?;
 
-	match client.request(req).await {
+	match http_client.request(req).await {
 		Ok(response) => {
 			// Map the response body from Incoming to our Body type
 			let (parts, incoming) = response.into_parts();
@@ -809,6 +849,7 @@ async fn execute_request(method: &'static Method, path: &str, redirect: bool, qu
 					quarantine,
 					base_path,
 					host,
+                    session,
 				)
 				.await;
 			};
@@ -867,11 +908,11 @@ async fn execute_request(method: &'static Method, path: &str, redirect: bool, qu
 /// will recurse on the URL that Reddit provides in the Location HTTP header
 /// in its response. On Tor, connection failures trigger circuit rebuilds and
 /// bounded retries.
-fn request(method: &'static Method, path: String, redirect: bool, quarantine: bool, base_path: &'static str, host: &'static str) -> Boxed<Result<Response<Body>, String>> {
+fn request(method: &'static Method, path: String, redirect: bool, quarantine: bool, base_path: &'static str, host: &'static str, session: Arc<Session>) -> Boxed<Result<Response<Body>, String>> {
 	async move {
 		#[cfg(feature = "tor")]
 		{
-			let mut result = execute_request(method, &path, redirect, quarantine, base_path, host).await;
+			let mut result = execute_request(method, &path, redirect, quarantine, base_path, host, session.clone()).await;
 			for attempt in 1..=2 {
 				if result.is_ok() {
 					mark_tor_connection_healthy();
@@ -883,7 +924,7 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 				} else {
 					recover_tor_connection(&format!("Request to {path} (retry {attempt}/2)"), None).await;
 				}
-				result = execute_request(method, &path, redirect, quarantine, base_path, host).await;
+				result = execute_request(method, &path, redirect, quarantine, base_path, host, session.clone()).await;
 			}
 			if result.is_ok() {
 				mark_tor_connection_healthy();
@@ -893,7 +934,7 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 
 		#[cfg(not(feature = "tor"))]
 		{
-			execute_request(method, &path, redirect, quarantine, base_path, host).await
+			execute_request(method, &path, redirect, quarantine, base_path, host, session).await
 		}
 	}
 	.boxed()
@@ -902,22 +943,27 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 /// Make a request to a Reddit API and parse the JSON response
 #[cached(size = 100, time = 30, result = true)]
 pub async fn json(path: String, quarantine: bool) -> Result<Value, Error> {
+    let session = get_session();
+
 	// Closure to quickly build errors
 	let err = |msg: &str, status: hyper::StatusCode, e: String, path: String| -> Result<Value, Error> {
 		Err(Error::new(status.as_u16(), format!("{msg}: {e} | {path}")))
 	};
 
-	// First, handle rolling over the OAUTH_CLIENT if need be.
-	let current_rate_limit = OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst);
-	let is_rolling_over = OAUTH_IS_ROLLING_OVER.load(Ordering::SeqCst);
+	// First, handle rolling over the OAuth client if need be.
+	let current_rate_limit = session.ratelimit_remaining.load(Ordering::SeqCst);
+	let is_rolling_over = session.is_rolling_over.load(Ordering::SeqCst);
 	if current_rate_limit < 10 && !is_rolling_over {
 		warn!("Rate limit {current_rate_limit} is low. Spawning force_refresh_token()");
-		tokio::spawn(force_refresh_token());
+        let s = session.clone();
+		tokio::spawn(async move {
+            force_refresh_token(s).await;
+        });
 	}
-	OAUTH_RATELIMIT_REMAINING.fetch_sub(1, Ordering::SeqCst);
+	session.ratelimit_remaining.fetch_sub(1, Ordering::SeqCst);
 
 	// Fetch the url...
-	match reddit_get(path.clone(), quarantine).await {
+	match reddit_get(path.clone(), quarantine, session.clone()).await {
 		Ok(response) => {
 			let status = response.status();
 
@@ -932,7 +978,7 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, Error> {
 				);
 
 				if let Ok(val) = remaining.parse::<f32>() {
-					OAUTH_RATELIMIT_REMAINING.store(val.round() as u16, Ordering::SeqCst);
+					session.ratelimit_remaining.store(val.round() as u16, Ordering::SeqCst);
 				}
 
 				Some(reset)
@@ -948,7 +994,10 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, Error> {
 
 					if !has_remaining {
 						// Rate limited, so spawn a force_refresh_token()
-						tokio::spawn(force_refresh_token());
+                        let s = session.clone();
+						tokio::spawn(async move {
+                            force_refresh_token(s).await;
+                        });
 						return match reset {
 							Some(val) => Err(Error::new(429, format!(
 								"Reddit rate limit exceeded. Try refreshing in a few seconds.\
@@ -976,8 +1025,8 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, Error> {
 							if json["error"].is_i64() {
 								// OAuth token has expired; http status 401
 								if json["message"] == "Unauthorized" {
-									error!("Forcing a token refresh");
-									let () = force_refresh_token().await;
+									error!("Forcing a token refresh due to 401 Unauthorized");
+									force_refresh_token(session.clone()).await;
 									return Err(Error::new(401, "OAuth token has expired. Please refresh the page!"));
 								}
 
@@ -1031,20 +1080,22 @@ async fn self_check(sub: &str) -> Result<(), String> {
 }
 
 pub async fn rate_limit_check() -> Result<(), String> {
-	// First, test the Oauth client
-	if matches!(OAUTH_CLIENT.load().backend, OauthBackendImpl::GenericWeb(_)) {
+	// Test the first session
+    let session = SESSION_POOL[0].clone();
+
+	if matches!(session.oauth.load().backend, OauthBackendImpl::GenericWeb(_)) {
 		warn!("[⚠️] Cannot perform rate limit check, running as GenericWeb. Skipping check.");
 		return Ok(());
 	}
 
 	self_check("reddit").await?;
-	if OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst) != 99 {
-		return Err(format!("Rate limit check 1 failed: expected 99, got {}", OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst)));
+	if session.ratelimit_remaining.load(Ordering::SeqCst) != 99 {
+		return Err(format!("Rate limit check 1 failed: expected 99, got {}", session.ratelimit_remaining.load(Ordering::SeqCst)));
 	}
-	force_refresh_token().await;
+	force_refresh_token(session.clone()).await;
 	self_check("rust").await?;
-	if OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst) != 99 {
-		return Err(format!("Rate limit check 2 failed: expected 99, got {}", OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst)));
+	if session.ratelimit_remaining.load(Ordering::SeqCst) != 99 {
+		return Err(format!("Rate limit check 2 failed: expected 99, got {}", session.ratelimit_remaining.load(Ordering::SeqCst)));
 	}
 
 	Ok(())
