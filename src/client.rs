@@ -334,9 +334,9 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 #[cached(size = 100, time = 30, result = true)]
 pub async fn json(path: String, quarantine: bool) -> Result<Value, ApiError> {
 	// Closure to quickly build errors
-	let err = |msg: &str, status: hyper::StatusCode, e: String, path: String| -> Result<Value, ApiError> {
+	let err = |msg: &str, status: u16, e: String, path: String| -> Result<Value, ApiError> {
 		// eprintln!("{} - {}: {}", url, msg, e);
-		Err(ApiError::new(status.as_u16(), format!("{msg}: {e} | {path}")))
+		Err(ApiError::new(status, format!("{msg}: {e} | {path}")))
 	};
 
 	// First, handle rolling over the OAUTH_CLIENT if need be.
@@ -441,15 +441,15 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, ApiError> {
 							if status.is_server_error() {
 								Err(ApiError::new(status.as_u16(), "Reddit is having issues, check if there's an outage"))
 							} else {
-								err("Failed to parse page JSON data", status, e.to_string(), path)
+								err("Failed to parse page JSON data", status.as_u16(), e.to_string(), path)
 							}
 						}
 					}
 				}
-				Err(e) => err("Failed receiving body from Reddit", status, e.to_string(), path),
+				Err(e) => err("Failed receiving body from Reddit", status.as_u16(), e.to_string(), path),
 			}
 		}
-		Err(e) => err("Couldn't send request to Reddit", hyper::StatusCode::INTERNAL_SERVER_ERROR, e, path),
+		Err(e) => err("Couldn't send request to Reddit", 500, e, path),
 	}
 }
 
