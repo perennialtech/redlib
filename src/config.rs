@@ -208,9 +208,17 @@ impl Config {
 		set_string_from_toml(&value, &mut config.defaults.front_page, &["REDLIB_DEFAULT_FRONT_PAGE", "LIBREDDIT_DEFAULT_FRONT_PAGE"]);
 		set_string_from_toml(&value, &mut config.defaults.layout, &["REDLIB_DEFAULT_LAYOUT", "LIBREDDIT_DEFAULT_LAYOUT"]);
 		set_bool_from_toml(&value, &mut config.defaults.wide, &["REDLIB_DEFAULT_WIDE", "LIBREDDIT_DEFAULT_WIDE"])?;
-		set_string_from_toml(&value, &mut config.defaults.comment_sort, &["REDLIB_DEFAULT_COMMENT_SORT", "LIBREDDIT_DEFAULT_COMMENT_SORT"]);
+		set_string_from_toml(
+			&value,
+			&mut config.defaults.comment_sort,
+			&["REDLIB_DEFAULT_COMMENT_SORT", "LIBREDDIT_DEFAULT_COMMENT_SORT"],
+		);
 		set_string_from_toml(&value, &mut config.defaults.post_sort, &["REDLIB_DEFAULT_POST_SORT", "LIBREDDIT_DEFAULT_POST_SORT"]);
-		set_bool_from_toml(&value, &mut config.defaults.blur_spoiler, &["REDLIB_DEFAULT_BLUR_SPOILER", "LIBREDDIT_DEFAULT_BLUR_SPOILER"])?;
+		set_bool_from_toml(
+			&value,
+			&mut config.defaults.blur_spoiler,
+			&["REDLIB_DEFAULT_BLUR_SPOILER", "LIBREDDIT_DEFAULT_BLUR_SPOILER"],
+		)?;
 		set_bool_from_toml(&value, &mut config.defaults.show_nsfw, &["REDLIB_DEFAULT_SHOW_NSFW", "LIBREDDIT_DEFAULT_SHOW_NSFW"])?;
 		set_bool_from_toml(&value, &mut config.defaults.blur_nsfw, &["REDLIB_DEFAULT_BLUR_NSFW", "LIBREDDIT_DEFAULT_BLUR_NSFW"])?;
 		set_bool_from_toml(&value, &mut config.defaults.use_hls, &["REDLIB_DEFAULT_USE_HLS", "LIBREDDIT_DEFAULT_USE_HLS"])?;
@@ -226,7 +234,11 @@ impl Config {
 			&["REDLIB_DEFAULT_HIDE_SIDEBAR_AND_SUMMARY", "LIBREDDIT_DEFAULT_HIDE_SIDEBAR_AND_SUMMARY"],
 		)?;
 		set_bool_from_toml(&value, &mut config.defaults.hide_score, &["REDLIB_DEFAULT_HIDE_SCORE", "LIBREDDIT_DEFAULT_HIDE_SCORE"])?;
-		set_string_from_toml(&value, &mut config.defaults.subscriptions, &["REDLIB_DEFAULT_SUBSCRIPTIONS", "LIBREDDIT_DEFAULT_SUBSCRIPTIONS"]);
+		set_string_from_toml(
+			&value,
+			&mut config.defaults.subscriptions,
+			&["REDLIB_DEFAULT_SUBSCRIPTIONS", "LIBREDDIT_DEFAULT_SUBSCRIPTIONS"],
+		);
 		set_string_from_toml(&value, &mut config.defaults.filters, &["REDLIB_DEFAULT_FILTERS", "LIBREDDIT_DEFAULT_FILTERS"]);
 		set_bool_from_toml(
 			&value,
@@ -237,8 +249,16 @@ impl Config {
 
 		set_bool_from_toml(&value, &mut config.instance.sfw_only, &["REDLIB_SFW_ONLY", "LIBREDDIT_SFW_ONLY"])?;
 		set_string_from_toml(&value, &mut config.instance.banner, &["REDLIB_BANNER", "LIBREDDIT_BANNER"]);
-		set_bool_from_toml(&value, &mut config.instance.robots_disable_indexing, &["REDLIB_ROBOTS_DISABLE_INDEXING", "LIBREDDIT_ROBOTS_DISABLE_INDEXING"])?;
-		set_string_from_toml(&value, &mut config.instance.pushshift_frontend, &["REDLIB_PUSHSHIFT_FRONTEND", "LIBREDDIT_PUSHSHIFT_FRONTEND"]);
+		set_bool_from_toml(
+			&value,
+			&mut config.instance.robots_disable_indexing,
+			&["REDLIB_ROBOTS_DISABLE_INDEXING", "LIBREDDIT_ROBOTS_DISABLE_INDEXING"],
+		)?;
+		set_string_from_toml(
+			&value,
+			&mut config.instance.pushshift_frontend,
+			&["REDLIB_PUSHSHIFT_FRONTEND", "LIBREDDIT_PUSHSHIFT_FRONTEND"],
+		);
 		set_bool_from_toml(&value, &mut config.instance.enable_rss, &["REDLIB_ENABLE_RSS"])?;
 		set_optional_string_from_toml(&value, &mut config.instance.full_url, &["REDLIB_FULL_URL"]);
 		set_optional_string_from_toml(&value, &mut config.instance.external_media_domain, &["REDLIB_EXTERNAL_MEDIA_DOMAIN"]);

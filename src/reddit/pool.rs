@@ -100,12 +100,7 @@ impl OAuthSessionPool {
 		}
 
 		let (shutdown, _) = watch::channel(false);
-		let next_session_id = sessions
-			.iter()
-			.map(|session| session.id)
-			.max()
-			.map(|max| max + 1)
-			.unwrap_or(0);
+		let next_session_id = sessions.iter().map(|session| session.id).max().map(|max| max + 1).unwrap_or(0);
 
 		let pool = Arc::new(Self {
 			sessions: RwLock::new(sessions),
@@ -166,18 +161,15 @@ impl OAuthSessionPool {
 
 		let health = session.health_summary();
 		if health != SessionHealthSummary::Ready {
-			return Err(ApiError::new(
-				503,
-				ApiErrorKind::PoolExhausted,
-				format!("Reddit API session {id} is not ready: {health:?}"),
-			));
+			return Err(ApiError::new(503, ApiErrorKind::PoolExhausted, format!("Reddit API session {id} is not ready: {health:?}")));
 		}
 
 		Ok(SessionLease::new(session, cost))
 	}
 
 	pub async fn ready_session_ids(&self) -> Vec<SessionId> {
-		self.sessions
+		self
+			.sessions
 			.read()
 			.await
 			.iter()

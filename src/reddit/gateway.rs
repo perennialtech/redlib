@@ -41,7 +41,6 @@ struct CanonicalCacheKey {
 	tries: u8,
 }
 
-
 pub struct RedditGateway {
 	pool: Arc<OAuthSessionPool>,
 	json_cache: Mutex<HashMap<JsonCacheKey, (Instant, Value)>>,
@@ -72,31 +71,21 @@ impl RedditGateway {
 	}
 
 	pub async fn json(&self, path: String, quarantine: bool) -> Result<Value, ApiError> {
-		let key = JsonCacheKey {
-			path: path.clone(),
-			quarantine,
-		};
+		let key = JsonCacheKey { path: path.clone(), quarantine };
 
 		if let Some(value) = self.get_json_cache(&key).await {
 			return Ok(value);
 		}
 
 		if let Some(rx) = self.join_json_wait(&key).await {
-			return rx.await.unwrap_or_else(|_| {
-				Err(ApiError::new(
-					500,
-					ApiErrorKind::InvalidResponse,
-					"coalesced Reddit JSON request was cancelled",
-				))
-			});
+			return rx
+				.await
+				.unwrap_or_else(|_| Err(ApiError::new(500, ApiErrorKind::InvalidResponse, "coalesced Reddit JSON request was cancelled")));
 		}
 
 		let result = self.json_uncached(path, quarantine).await;
 		if let Ok(value) = &result {
-			self.json_cache
-				.lock()
-				.await
-				.insert(key.clone(), (Instant::now() + Duration::from_secs(30), value.clone()));
+			self.json_cache.lock().await.insert(key.clone(), (Instant::now() + Duration::from_secs(30), value.clone()));
 		}
 		self.finish_json_wait(&key, result.clone()).await;
 		result
@@ -118,22 +107,14 @@ impl RedditGateway {
 		let status = response.status;
 
 		if response.body.is_empty() {
-			return Err(ApiError::new(
-				429,
-				ApiErrorKind::RateLimited,
-				"Reddit rate limit exceeded",
-			));
+			return Err(ApiError::new(429, ApiErrorKind::RateLimited, "Reddit rate limit exceeded"));
 		}
 
 		let json: Value = serde_json::from_slice(&response.body).map_err(|err| {
 			if status.is_server_error() {
 				ApiError::new(status.as_u16(), ApiErrorKind::InvalidResponse, "Reddit is having issues, check if there's an outage")
 			} else {
-				ApiError::new(
-					status.as_u16(),
-					ApiErrorKind::RedditJson,
-					format!("Failed to parse page JSON data: {err} | {path}"),
-				)
+				ApiError::new(status.as_u16(), ApiErrorKind::RedditJson, format!("Failed to parse page JSON data: {err} | {path}"))
 			}
 		})?;
 
@@ -176,10 +157,7 @@ impl RedditGateway {
 			return Ok(None);
 		}
 
-		let key = CanonicalCacheKey {
-			path: path.clone(),
-			tries,
-		};
+		let key = CanonicalCacheKey { path: path.clone(), tries };
 
 		if let Some(value) = self.get_canonical_cache(&key).await {
 			return Ok(value);
@@ -191,7 +169,8 @@ impl RedditGateway {
 
 		let result = self.canonical_path_uncached(path, tries).await;
 		if let Ok(value) = &result {
-			self.canonical_cache
+			self
+				.canonical_cache
 				.lock()
 				.await
 				.insert(key.clone(), (Instant::now() + Duration::from_secs(600), value.clone()));
@@ -246,12 +225,12 @@ impl RedditGateway {
 			300..=399 => Ok(None),
 			429 => Err(ApiError::new(429, ApiErrorKind::RateLimited, "Too many requests.")),
 			403 if policy_error => Err(ApiError::new(429, ApiErrorKind::RateLimited, "Too many requests.")),
-			_ => Ok(response.headers.get(LOCATION).map(|val| {
-				percent_encode(val.as_bytes(), CONTROLS)
-					.to_string()
-					.trim_start_matches(RedditBase::OAuth.url())
-					.to_string()
-			})),
+			_ => Ok(
+				response
+					.headers
+					.get(LOCATION)
+					.map(|val| percent_encode(val.as_bytes(), CONTROLS).to_string().trim_start_matches(RedditBase::OAuth.url()).to_string()),
+			),
 		}
 	}
 
@@ -342,7 +321,10 @@ impl RedditGateway {
 
 			let status = resp.status();
 			let headers = resp.headers().clone();
-			let body = resp.bytes().await.map_err(|err| ApiError::new(502, ApiErrorKind::InvalidResponse, format!("Failed receiving body from Reddit: {err}")))?;
+			let body = resp
+				.bytes()
+				.await
+				.map_err(|err| ApiError::new(502, ApiErrorKind::InvalidResponse, format!("Failed receiving body from Reddit: {err}")))?;
 			return Ok(RedditResponse {
 				status,
 				headers,
@@ -439,7 +421,9 @@ impl RedditGateway {
 							quarantine: true,
 							follow_redirects: true,
 							cost: RateCost::ONE,
-							retry_policy: RetryPolicy { max_attempts: NonZeroUsize::new(1).unwrap() },
+							retry_policy: RetryPolicy {
+								max_attempts: NonZeroUsize::new(1).unwrap(),
+							},
 						},
 						&lease,
 					)
@@ -462,11 +446,7 @@ impl RedditGateway {
 	}
 
 	async fn media_user_agent(&self) -> Option<HeaderValue> {
-		self.pool
-			.acquire(&HashSet::new(), RateCost::ZERO)
-			.await
-			.ok()
-			.map(|lease| lease.token.user_agent.clone())
+		self.pool.acquire(&HashSet::new(), RateCost::ZERO).await.ok().map(|lease| lease.token.user_agent.clone())
 	}
 
 	async fn get_json_cache(&self, key: &JsonCacheKey) -> Option<Value> {

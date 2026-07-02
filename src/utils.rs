@@ -1051,14 +1051,14 @@ pub fn format_url(url: &str) -> String {
 						} else {
 							[prefix, format, &caps[1]].join("")
 						}
-					},
+					}
 					2 => {
 						if caps.len() > 3 {
 							[prefix, format, &caps[2], "/", &caps[3]].join("")
 						} else {
 							[prefix, format, &caps[1], "/", &caps[2]].join("")
 						}
-					},
+					}
 					3 => [prefix, format, &caps[1], "/", &caps[2].to_lowercase().as_str(), "/", &caps[3]].join(""),
 					_ => String::new(),
 				})

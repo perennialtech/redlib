@@ -18,10 +18,7 @@ pub fn install_reddit_gateway(gateway: Arc<RedditGateway>) {
 }
 
 fn reddit() -> Arc<RedditGateway> {
-	REDDIT_GATEWAY
-		.get()
-		.expect("RedditGateway must be installed during application startup")
-		.clone()
+	REDDIT_GATEWAY.get().expect("RedditGateway must be installed during application startup").clone()
 }
 
 pub async fn canonical_path(path: String, tries: i8) -> Result<Option<String>, String> {

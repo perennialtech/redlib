@@ -1,11 +1,11 @@
 pub mod app_state;
 pub mod client;
 pub mod config;
-pub mod reddit;
 pub mod duplicates;
 pub mod instance_info;
 pub mod oauth_resources;
 pub mod post;
+pub mod reddit;
 pub mod search;
 pub mod server;
 pub mod settings;

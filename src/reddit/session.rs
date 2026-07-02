@@ -129,7 +129,11 @@ impl RateLimitState {
 	pub fn update_from_headers(&mut self, headers: &HeaderMap) {
 		let now = Instant::now();
 
-		if let Some(remaining) = headers.get("x-ratelimit-remaining").and_then(|val| val.to_str().ok()).and_then(|val| val.parse::<f32>().ok()) {
+		if let Some(remaining) = headers
+			.get("x-ratelimit-remaining")
+			.and_then(|val| val.to_str().ok())
+			.and_then(|val| val.parse::<f32>().ok())
+		{
 			self.remaining = remaining;
 			self.headers_seen = true;
 		}
@@ -231,7 +235,8 @@ impl OAuthSession {
 	}
 
 	pub fn token_is_fresh(&self, danger_window: Duration) -> bool {
-		self.token
+		self
+			.token
 			.load()
 			.expires_at
 			.checked_duration_since(Instant::now())
@@ -247,9 +252,7 @@ impl OAuthSession {
 		state.update_from_headers(headers);
 		if status.as_u16() == 429 {
 			state.consecutive_429s += 1;
-			let until = state
-				.soonest_reset()
-				.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
+			let until = state.soonest_reset().unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
 			state.cooldown_until = Some(until);
 			let _ = self.health.send(SessionHealth::Cooldown {
 				until,
@@ -346,9 +349,7 @@ impl OAuthSession {
 	pub async fn apply_quota_policy(&self) {
 		let mut state = self.rate_limit.lock().await;
 		if state.remaining <= self.config.reserve_remaining_per_session as f32 {
-			let until = state
-				.reset_at
-				.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
+			let until = state.reset_at.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
 			state.cooldown_until = Some(until);
 			let _ = self.health.send(SessionHealth::Cooldown {
 				until,
@@ -399,10 +400,7 @@ fn build_token_state(backend: &OAuthBackendImpl, auth: crate::reddit::oauth::Aut
 		.map_err(|_| ApiError::new(500, ApiErrorKind::Auth, "OAuth token could not be converted to an Authorization header"))?;
 	auth_headers.insert(AUTHORIZATION, authorization);
 
-	let user_agent = auth_headers
-		.get(USER_AGENT)
-		.cloned()
-		.unwrap_or_else(|| backend.user_agent());
+	let user_agent = auth_headers.get(USER_AGENT).cloned().unwrap_or_else(|| backend.user_agent());
 
 	Ok(TokenState {
 		access_token: auth.token,

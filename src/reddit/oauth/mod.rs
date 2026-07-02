@@ -1,7 +1,4 @@
-use crate::{
-	config::BackendPolicy,
-	oauth_resources::ANDROID_APP_VERSION_LIST,
-};
+use crate::{config::BackendPolicy, oauth_resources::ANDROID_APP_VERSION_LIST};
 use base64::{engine::general_purpose, Engine as _};
 use log::{info, trace, warn};
 use serde_json::json;
@@ -244,10 +241,7 @@ impl GenericWebAuth {
 
 	pub async fn authenticate(&mut self, transport: &WreqClient) -> Result<AuthResponse, AuthError> {
 		let url = "https://www.reddit.com/api/v1/access_token";
-		let body = format!(
-			"grant_type=https%3A%2F%2Foauth.reddit.com%2Fgrants%2Finstalled_client&device_id={}",
-			self.device_id
-		);
+		let body = format!("grant_type=https%3A%2F%2Foauth.reddit.com%2Fgrants%2Finstalled_client&device_id={}", self.device_id);
 
 		let mut builder = transport.post(url);
 		for (key, value) in &self.headers {

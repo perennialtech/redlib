@@ -110,8 +110,20 @@ impl InstanceInfo {
 	fn to_table(&self) -> String {
 		let mut container = Container::default();
 		let convert = |o: &Option<String>| -> String { o.clone().unwrap_or_else(|| "<span class=\"unset\"><i>Unset</i></span>".to_owned()) };
-		let convert_str = |s: &str| -> String { if s.is_empty() { "<span class=\"unset\"><i>Unset</i></span>".to_owned() } else { s.to_owned() } };
-		let convert_bool = |b: bool| -> String { if b { "true".to_owned() } else { "false".to_owned() } };
+		let convert_str = |s: &str| -> String {
+			if s.is_empty() {
+				"<span class=\"unset\"><i>Unset</i></span>".to_owned()
+			} else {
+				s.to_owned()
+			}
+		};
+		let convert_bool = |b: bool| -> String {
+			if b {
+				"true".to_owned()
+			} else {
+				"false".to_owned()
+			}
+		};
 		if !self.config.instance.banner.is_empty() {
 			container.add_header(3, "Instance banner");
 			container.add_raw("<br />");

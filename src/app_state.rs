@@ -18,10 +18,6 @@ impl AppState {
 		let external_http = build_external_http_client();
 		let reddit = Arc::new(RedditGateway::new(config.reddit.clone()).await?);
 
-		Ok(Self {
-			config,
-			reddit,
-			external_http,
-		})
+		Ok(Self { config, reddit, external_http })
 	}
 }

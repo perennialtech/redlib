@@ -22,10 +22,7 @@ pub fn build_reddit_transport() -> WreqClient {
 }
 
 pub fn build_media_http_client() -> WreqClient {
-	WreqClient::builder()
-		.redirect(Policy::none())
-		.build()
-		.expect("media HTTP client should build")
+	WreqClient::builder().redirect(Policy::none()).build().expect("media HTTP client should build")
 }
 
 pub fn build_external_http_client() -> WreqClient {
