@@ -186,11 +186,11 @@ pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 					no_posts,
 				}))
 			}
-			Err(msg) => match msg.as_str() {
-				"quarantined" | "gated" => Ok(quarantine(&req, sub_name, &msg)),
-				"private" => error(req, &format!("r/{sub_name} is a private community")).await,
-				"banned" => error(req, &format!("r/{sub_name} has been banned from Reddit")).await,
-				_ => error(req, &msg).await,
+			Err(e) => match e.message.as_str() {
+				"quarantined" | "gated" => Ok(quarantine(&req, sub_name, &e.message)),
+				"private" => error(req, 403, &format!("r/{sub_name} is a private community")).await,
+				"banned" => error(req, 404, &format!("r/{sub_name} has been banned from Reddit")).await,
+				_ => error(req, e.status, &e.message).await,
 			},
 		}
 	}
@@ -478,11 +478,11 @@ pub async fn wiki(req: Request<Body>) -> Result<Response<Body>, String> {
 			prefs: Preferences::new(&req),
 			url,
 		})),
-		Err(msg) => {
-			if msg == "quarantined" || msg == "gated" {
-				Ok(quarantine(&req, sub, &msg))
+		Err(e) => {
+			if e.message == "quarantined" || e.message == "gated" {
+				Ok(quarantine(&req, sub, &e.message))
 			} else {
-				error(req, &msg).await
+				error(req, e.status, &e.message).await
 			}
 		}
 	}
@@ -516,11 +516,11 @@ pub async fn sidebar(req: Request<Body>) -> Result<Response<Body>, String> {
 			prefs: Preferences::new(&req),
 			url,
 		})),
-		Err(msg) => {
-			if msg == "quarantined" || msg == "gated" {
-				Ok(quarantine(&req, sub, &msg))
+		Err(e) => {
+			if e.message == "quarantined" || e.message == "gated" {
+				Ok(quarantine(&req, sub, &e.message))
 			} else {
-				error(req, &msg).await
+				error(req, e.status, &e.message).await
 			}
 		}
 	}
@@ -561,7 +561,7 @@ pub async fn sidebar(req: Request<Body>) -> Result<Response<Body>, String> {
 // }
 
 // SUBREDDIT
-async fn subreddit(sub: &str, quarantined: bool) -> Result<Subreddit, String> {
+async fn subreddit(sub: &str, quarantined: bool) -> Result<Subreddit, crate::client::Error> {
 	// Build the Reddit JSON API url
 	let path: String = format!("/r/{sub}/about.json?raw_json=1");
 
@@ -592,7 +592,7 @@ async fn subreddit(sub: &str, quarantined: bool) -> Result<Subreddit, String> {
 
 pub async fn rss(req: Request<Body>) -> Result<Response<Body>, String> {
 	if config::get_setting("REDLIB_ENABLE_RSS").is_none() {
-		return Ok(error(req, "RSS is disabled on this instance.").await.unwrap_or_default());
+		return Ok(error(req, 403, "RSS is disabled on this instance.").await.unwrap_or_default());
 	}
 
 	use hyper::header::CONTENT_TYPE;
@@ -607,10 +607,10 @@ pub async fn rss(req: Request<Body>) -> Result<Response<Body>, String> {
 	let path = format!("/r/{sub}/{sort}.json?{}", req.uri().query().unwrap_or_default());
 
 	// Get subreddit data
-	let subreddit = subreddit(&sub, false).await?;
+	let subreddit = subreddit(&sub, false).await.map_err(|e| e.message)?;
 
 	// Get posts
-	let (posts, _) = Post::fetch(&path, false).await?;
+	let (posts, _) = Post::fetch(&path, false).await.map_err(|e| e.message)?;
 
 	// Build the RSS feed
 	let channel = ChannelBuilder::default()

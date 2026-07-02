@@ -357,18 +357,18 @@ pub struct Post {
 
 impl Post {
 	/// Fetch posts of a user or subreddit and return a vector of posts and the "after" value
-	pub async fn fetch(path: &str, quarantine: bool) -> Result<(Vec<Self>, String), String> {
+	pub async fn fetch(path: &str, quarantine: bool) -> Result<(Vec<Self>, String), crate::client::Error> {
 		// Send a request to the url
 		let res = match json(path.to_string(), quarantine).await {
 			// If success, receive JSON in response
 			Ok(response) => response,
 			// If the Reddit API returns an error, exit this function
-			Err(msg) => return Err(msg),
+			Err(e) => return Err(e),
 		};
 
 		// Fetch the list of posts from the JSON response
 		let Some(post_list) = res["data"]["children"].as_array() else {
-			return Err("No posts found".to_string());
+			return Err(crate::client::Error::new(500, "No posts found"));
 		};
 
 		let mut posts: Vec<Self> = Vec::new();
@@ -995,7 +995,7 @@ pub async fn catch_random(sub: &str, additional: &str) -> Result<Response<Body>,
 	if sub == "random" || sub == "randnsfw" {
 		Ok(redirect(&format!(
 			"/r/{}{additional}",
-			json(format!("/r/{sub}/about.json?raw_json=1"), false).await?["data"]["display_name"]
+			json(format!("/r/{sub}/about.json?raw_json=1"), false).await.map_err(|e| e.message)?["data"]["display_name"]
 				.as_str()
 				.unwrap_or_default()
 		)))
@@ -1423,7 +1423,7 @@ pub fn redirect(path: &str) -> Response<Body> {
 }
 
 /// Renders a generic error landing page.
-pub async fn error(req: Request<Body>, msg: &str) -> Result<Response<Body>, String> {
+pub async fn error(req: Request<Body>, status: u16, msg: &str) -> Result<Response<Body>, String> {
 	error!("Error page rendered: {}", msg.split('|').next().unwrap_or_default());
 	let url = req.uri().to_string();
 	let body = ErrorTemplate {
@@ -1434,7 +1434,7 @@ pub async fn error(req: Request<Body>, msg: &str) -> Result<Response<Body>, Stri
 	.render()
 	.unwrap_or_default();
 
-	Ok(Response::builder().status(404).header("content-type", "text/html").body(full(body)).unwrap())
+	Ok(Response::builder().status(status).header("content-type", "text/html").body(full(body)).unwrap())
 }
 
 /// Renders a generic info landing page.
