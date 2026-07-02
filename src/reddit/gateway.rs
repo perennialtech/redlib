@@ -41,12 +41,15 @@ struct CanonicalCacheKey {
 	tries: u8,
 }
 
+type JsonWaiters = HashMap<JsonCacheKey, Vec<oneshot::Sender<Result<Value, ApiError>>>>;
+type CanonicalWaiters = HashMap<CanonicalCacheKey, Vec<oneshot::Sender<Result<Option<String>, ApiError>>>>;
+
 pub struct RedditGateway {
 	pool: Arc<OAuthSessionPool>,
 	json_cache: Mutex<HashMap<JsonCacheKey, (Instant, Value)>>,
-	json_waiters: Mutex<HashMap<JsonCacheKey, Vec<oneshot::Sender<Result<Value, ApiError>>>>>,
+	json_waiters: Mutex<JsonWaiters>,
 	canonical_cache: Mutex<HashMap<CanonicalCacheKey, (Instant, Option<String>)>>,
-	canonical_waiters: Mutex<HashMap<CanonicalCacheKey, Vec<oneshot::Sender<Result<Option<String>, ApiError>>>>>,
+	canonical_waiters: Mutex<CanonicalWaiters>,
 	media_http: WreqClient,
 	config: RedditConfig,
 }
@@ -164,7 +167,7 @@ impl RedditGateway {
 		}
 
 		if let Some(rx) = self.join_canonical_wait(&key).await {
-			return rx.await.unwrap_or_else(|_| Ok(None));
+			return rx.await.unwrap_or(Ok(None));
 		}
 
 		let result = self.canonical_path_uncached(path, tries).await;
@@ -264,7 +267,7 @@ impl RedditGateway {
 			}
 		}
 
-		self.pool.acquire(&excluded, request.cost).await.map(|_| unreachable!()).map_err(|err| err)
+		self.pool.acquire(&excluded, request.cost).await.map(|_| unreachable!())
 	}
 
 	async fn send_with_lease(&self, request: &RedditRequest, lease: &SessionLease) -> Result<RedditResponse, ApiError> {

@@ -137,7 +137,7 @@ impl OAuthSessionPool {
 			let Some(score) = session.score(self.config.reserve_remaining_per_session, 0.75, 3.0).await else {
 				continue;
 			};
-			if best.as_ref().is_none_or(|(_, best_score)| compare_scores(score, *best_score).is_gt()) {
+			if best.as_ref().map_or(true, |(_, best_score)| compare_scores(score, *best_score).is_gt()) {
 				best = Some((session, score));
 			}
 		}

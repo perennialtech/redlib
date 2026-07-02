@@ -17,7 +17,7 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(Config::load);
 /// will be the base of a link, to display removed content (on another site).
 pub const DEFAULT_PUSHSHIFT_FRONTEND: &str = "undelete.pullpush.io";
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Default)]
 pub struct Config {
 	pub instance: InstanceConfig,
 	pub defaults: DefaultUserConfig,
@@ -95,16 +95,6 @@ pub struct RedditConfig {
 	pub request_timeout: Duration,
 	pub max_attempts_per_api_request: NonZeroUsize,
 	pub quota_exhaustion_policy: QuotaExhaustionPolicy,
-}
-
-impl Default for Config {
-	fn default() -> Self {
-		Self {
-			instance: InstanceConfig::default(),
-			defaults: DefaultUserConfig::default(),
-			reddit: RedditConfig::default(),
-		}
-	}
 }
 
 impl Default for InstanceConfig {

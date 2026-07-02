@@ -138,6 +138,12 @@ pub struct MobileSpoofAuth {
 	additional_headers: HeaderMap,
 }
 
+impl Default for MobileSpoofAuth {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
 impl MobileSpoofAuth {
 	pub fn new() -> Self {
 		let uuid = uuid::Uuid::new_v4().to_string();
@@ -206,6 +212,12 @@ pub struct GenericWebAuth {
 	user_agent: HeaderValue,
 	headers: HeaderMap,
 	additional_headers: HeaderMap,
+}
+
+impl Default for GenericWebAuth {
+	fn default() -> Self {
+		Self::new()
+	}
 }
 
 impl GenericWebAuth {

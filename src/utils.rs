@@ -1059,7 +1059,7 @@ pub fn format_url(url: &str) -> String {
 							[prefix, format, &caps[1], "/", &caps[2]].join("")
 						}
 					}
-					3 => [prefix, format, &caps[1], "/", &caps[2].to_lowercase().as_str(), "/", &caps[3]].join(""),
+					3 => [prefix, format, &caps[1], "/", caps[2].to_lowercase().as_str(), "/", &caps[3]].join(""),
 					_ => String::new(),
 				})
 			};
