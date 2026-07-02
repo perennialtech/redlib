@@ -1,0 +1,129 @@
+# Caddyfile for Redlib external media proxy
+# Replace media.example.com with your REDLIB_EXTERNAL_MEDIA_DOMAIN
+
+(reddit_media_proxy_headers) {
+	# Do not forward user/session headers to Reddit media hosts.
+	header_up -Cookie
+	header_up -Authorization
+	header_up -Proxy-Authorization
+
+	# Avoid leaking client IP/proxy-chain metadata upstream.
+	header_up -Forwarded
+	header_up -X-Forwarded-For
+	header_up -X-Real-IP
+
+	# Do not let upstream media hosts set cookies on this proxy domain.
+	header_down -Set-Cookie
+}
+
+media.example.com {
+	# Helpful for cross-origin media loading from the main Redlib domain.
+	header {
+		Access-Control-Allow-Origin "*"
+		Cross-Origin-Resource-Policy cross-origin
+		X-Content-Type-Options nosniff
+	}
+
+	@vid_dash path_regexp vid_dash ^/vid/([A-Za-z0-9_-]+)/dash/(.+)$
+	handle @vid_dash {
+		rewrite /{re.vid_dash.1}/DASH_{re.vid_dash.2}
+		reverse_proxy https://v.redd.it {
+			header_up Host v.redd.it
+			import reddit_media_proxy_headers
+		}
+	}
+
+	@vid_cmaf path_regexp vid_cmaf ^/vid/([A-Za-z0-9_-]+)/cmaf/(.+)$
+	handle @vid_cmaf {
+		rewrite /{re.vid_cmaf.1}/CMAF_{re.vid_cmaf.2}
+		reverse_proxy https://v.redd.it {
+			header_up Host v.redd.it
+			import reddit_media_proxy_headers
+		}
+	}
+
+	@hls path_regexp hls ^/hls/([A-Za-z0-9_-]+)/(.+)$
+	handle @hls {
+		rewrite /{re.hls.1}/{re.hls.2}
+		reverse_proxy https://v.redd.it {
+			header_up Host v.redd.it
+			import reddit_media_proxy_headers
+		}
+	}
+
+	@img path_regexp img ^/img/(.+)$
+	handle @img {
+		rewrite /{re.img.1}
+		reverse_proxy https://i.redd.it {
+			header_up Host i.redd.it
+			import reddit_media_proxy_headers
+		}
+	}
+
+	@thumb path_regexp thumb ^/thumb/([A-Za-z0-9-]+)/(.+)$
+	handle @thumb {
+		rewrite /{re.thumb.2}
+		reverse_proxy https://{re.thumb.1}.thumbs.redditmedia.com {
+			header_up Host {re.thumb.1}.thumbs.redditmedia.com
+			import reddit_media_proxy_headers
+		}
+	}
+
+	@emoji path_regexp emoji ^/emoji/([^/]+)/(.+)$
+	handle @emoji {
+		rewrite /{re.emoji.1}/{re.emoji.2}
+		reverse_proxy https://emoji.redditmedia.com {
+			header_up Host emoji.redditmedia.com
+			import reddit_media_proxy_headers
+		}
+	}
+
+	@emote path_regexp emote ^/emote/([A-Za-z0-9_-]+)/(.+)$
+	handle @emote {
+		rewrite /asset-manager/{re.emote.1}/{re.emote.2}
+		reverse_proxy https://reddit-econ-prod-assets-permanent.s3.amazonaws.com {
+			header_up Host reddit-econ-prod-assets-permanent.s3.amazonaws.com
+			import reddit_media_proxy_headers
+		}
+	}
+
+	@preview_pre path_regexp preview_pre ^/preview/pre/(.+)$
+	handle @preview_pre {
+		rewrite /{re.preview_pre.1}
+		reverse_proxy https://preview.redd.it {
+			header_up Host preview.redd.it
+			import reddit_media_proxy_headers
+		}
+	}
+
+	@preview_external_pre path_regexp preview_external_pre ^/preview/external-pre/(.+)$
+	handle @preview_external_pre {
+		rewrite /{re.preview_external_pre.1}
+		reverse_proxy https://external-preview.redd.it {
+			header_up Host external-preview.redd.it
+			import reddit_media_proxy_headers
+		}
+	}
+
+	@style path_regexp style ^/style/(.+)$
+	handle @style {
+		rewrite /{re.style.1}
+		reverse_proxy https://styles.redditmedia.com {
+			header_up Host styles.redditmedia.com
+			import reddit_media_proxy_headers
+		}
+	}
+
+	@static path_regexp static ^/static/(.+)$
+	handle @static {
+		rewrite /{re.static.1}
+		reverse_proxy https://www.redditstatic.com {
+			header_up Host www.redditstatic.com
+			import reddit_media_proxy_headers
+		}
+	}
+
+	handle {
+		respond "not found" 404
+	}
+}

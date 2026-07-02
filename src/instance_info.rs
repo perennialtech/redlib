@@ -134,6 +134,7 @@ impl InstanceInfo {
 				["Fingerprint max age (s)", &convert(&self.config.fingerprint_max_age_seconds)],
 				["Fingerprint score threshold", &convert(&self.config.fingerprint_score_threshold)],
 				["Fingerprint blocklist", &convert(&self.config.fingerprint_blocklist)],
+				["External media domain", &convert(&self.config.external_media_domain)],
 				//TODO: fallback to crate::config::DEFAULT_PUSHSHIFT_FRONTEND
 			])
 			.with_header_row(["Settings"]),
@@ -180,6 +181,7 @@ impl InstanceInfo {
 				Fingerprint max age (s): {:?}\n
 				Fingerprint score threshold: {:?}\n
 				Fingerprint blocklist: {:?}\n
+				External media domain: {:?}\n
                 Config:\n
                     Banner: {:?}\n
                     Hide awards: {:?}\n
@@ -211,6 +213,7 @@ impl InstanceInfo {
 					self.config.fingerprint_max_age_seconds,
 					self.config.fingerprint_score_threshold,
 					self.config.fingerprint_blocklist,
+					self.config.external_media_domain,
 					self.config.pushshift,
 					self.config.banner,
 					self.config.default_hide_awards,

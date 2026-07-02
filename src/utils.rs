@@ -1051,25 +1051,34 @@ pub fn format_url(url: &str) -> String {
 		Url::parse(url_ref).map_or(url_ref.to_string(), |parsed| {
 			let domain = parsed.domain().unwrap_or_default();
 
+			let ext_domain = crate::config::get_setting("REDLIB_EXTERNAL_MEDIA_DOMAIN");
+			let prefix = match ext_domain {
+				Some(domain) if !domain.is_empty() => {
+					let clean_domain = domain.trim_start_matches("https://").trim_start_matches("http://");
+					format!("https://{clean_domain}")
+				},
+				_ => String::new(),
+			};
+
 			let capture = |regex: &Regex, format: &str, segments: i16| {
 				regex.captures(url_ref).map_or(String::new(), |caps| match segments {
 					1 => {
 						// Handle both regular and .onion URLs - capture group is now at index 2
 						if caps.len() > 2 {
-							[format, &caps[2]].join("")
+							[&prefix, format, &caps[2]].join("")
 						} else {
-							[format, &caps[1]].join("")
+							[&prefix, format, &caps[1]].join("")
 						}
 					},
 					2 => {
 						// For videos and emojis, we need to handle the different capture groups
 						if caps.len() > 3 {
-							[format, &caps[2], "/", &caps[3]].join("")
+							[&prefix, format, &caps[2], "/", &caps[3]].join("")
 						} else {
-							[format, &caps[1], "/", &caps[2]].join("")
+							[&prefix, format, &caps[1], "/", &caps[2]].join("")
 						}
 					},
-					3 => [format, &caps[1], "/", &caps[2].to_lowercase().as_str(), "/", &caps[3]].join(""),
+					3 => [&prefix, format, &caps[1], "/", &caps[2].to_lowercase().as_str(), "/", &caps[3]].join(""),
 					_ => String::new(),
 				})
 			};
@@ -1150,7 +1159,7 @@ pub fn render_bullet_lists(input_text: &str) -> String {
 static REDDIT_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"href="(https|http|)://(www\.|old\.|np\.|amp\.|new\.|oauth\.|)(reddit\.com|redd\.it|reddittorjg6rue252oqsxryoxengawnmo46qy4kyii5wtqnwfj4ooad\.onion)/"#).unwrap());
 static REDDIT_PREVIEW_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://(external-preview|preview|i)\.(redd\.it|redditdotzhmh3mao6r5i2j7speppwqkizwo7vksy3mbz5iz7rlhocyd\.onion)(.*)").unwrap());
 static REDDIT_EMOJI_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"https?://(www\.)?(redditstatic\.com|reddittic34i5gtjcnm2fb7fv2eyop4vbxquuc36prnbs7d2kp3saoqd\.onion)/(.*)").unwrap());
-static REDLIB_PREVIEW_LINK_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"/(img|preview/)(pre|external-pre)?/(.*?)>"#).unwrap());
+static REDLIB_PREVIEW_LINK_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(https://[^/]+/|/)(img|preview/)(pre|external-pre)?/(.*?)>"#).unwrap());
 static REDLIB_PREVIEW_TEXT_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r">(.*?)</a>").unwrap());
 
 /// Rewrite Reddit links to Redlib in body of text
@@ -1230,8 +1239,17 @@ pub fn rewrite_urls(input_text: &str) -> String {
 				_ => "/img",
 			};
 
+			let ext_domain = crate::config::get_setting("REDLIB_EXTERNAL_MEDIA_DOMAIN");
+			let prefix = match ext_domain {
+				Some(domain) if !domain.is_empty() => {
+					let clean_domain = domain.trim_start_matches("https://").trim_start_matches("http://");
+					format!("https://{clean_domain}")
+				},
+				_ => String::new(),
+			};
+
 			text1 = REDDIT_PREVIEW_REGEX
-				.replace(&text1, format!("{_preview_type}$3"))
+				.replace(&text1, format!("{prefix}{_preview_type}$3"))
 				.replace(&image_to_replace, &_image_replacement)
 		}
 	}
@@ -1299,9 +1317,18 @@ pub fn rewrite_emotes(media_metadata: &Value, comment: String) -> String {
 				It's a good idea and makes everything look nicer, so we'll do the same. */
 				let size = media_metadata.json_path(&size_path).first().unwrap().to_string();
 
+				let ext_domain = crate::config::get_setting("REDLIB_EXTERNAL_MEDIA_DOMAIN");
+				let prefix = match ext_domain {
+					Some(domain) if !domain.is_empty() => {
+						let clean_domain = domain.trim_start_matches("https://").trim_start_matches("http://");
+						format!("https://{clean_domain}")
+					},
+					_ => String::new(),
+				};
+
 				// Replace the ID we found earlier in the comment with the respective image and it's link from the regex capture
 				let to_replace_with = format!(
-					"<img loading=\"lazy\" src=\"/emote/{} width=\"{size}\" height=\"{size}\" style=\"vertical-align:text-bottom\">",
+					"<img loading=\"lazy\" src=\"{prefix}/emote/{} width=\"{size}\" height=\"{size}\" style=\"vertical-align:text-bottom\">",
 					&link_capture[1]
 				);
 

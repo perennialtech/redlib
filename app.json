@@ -97,6 +97,9 @@
     },
     "REDLIB_FINGERPRINT_BLOCKLIST": {
       "required": false
+    },
+    "REDLIB_EXTERNAL_MEDIA_DOMAIN": {
+      "required": false
     }
   }
 }
