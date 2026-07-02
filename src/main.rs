@@ -210,12 +210,21 @@ async fn main() {
 	// Refresh browser version data (Chrome stable + iOS) used for UA age gating.
 	fingerprint::start_ua_versions_daemon();
 
+	let mut csp = "default-src 'none'; font-src 'self'; script-src 'self' blob:; manifest-src 'self'; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; worker-src blob:;".to_string();
+
+	if let Some(domain) = config::get_setting("REDLIB_EXTERNAL_MEDIA_DOMAIN").filter(|d| !d.is_empty()) {
+		let clean_domain = domain.trim_start_matches("https://").trim_start_matches("http://");
+		csp.push_str(&format!(" media-src 'self' data: blob: about: https://{clean_domain} http://{clean_domain}; img-src 'self' data: https://{clean_domain} http://{clean_domain}; connect-src 'self' https://{clean_domain} http://{clean_domain};"));
+	} else {
+		csp.push_str(" media-src 'self' data: blob: about:; img-src 'self' data:; connect-src 'self';");
+	}
+
 	// Define default headers (added to all responses)
 	app.default_headers = headers! {
 		"Referrer-Policy" => "no-referrer",
 		"X-Content-Type-Options" => "nosniff",
 		"X-Frame-Options" => "DENY",
-		"Content-Security-Policy" => "default-src 'none'; font-src 'self'; script-src 'self' blob:; manifest-src 'self'; media-src 'self' data: blob: about:; style-src 'self' 'unsafe-inline'; base-uri 'none'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; connect-src 'self'; worker-src blob:;"
+		"Content-Security-Policy" => &csp
 	};
 
 	if let Some(expire_time) = hsts {
